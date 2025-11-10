@@ -1,3 +1,4 @@
+#` @import ggplot2
 #` @import rtracklayer
 #` @import data.table
 #` @import Matrix
