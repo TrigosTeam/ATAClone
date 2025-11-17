@@ -8,7 +8,7 @@ fix_peak_range <- function(peak_info, target_width){
   peak_info
 }
 
-
+#' @export
 get_peaks_altius <- function(altius_peak_mat_path, altius_sample_info_path, altius_peak_info_path, n_systems, fixed_peak_width = NULL){
   require("Matrix")
   require("MatrixGenerics")
@@ -46,6 +46,7 @@ make_bins <- function(chr_arm_info, bin_width){
   as.integer(floor(seq(chr_arm_info[1], chr_arm_info[2], new_bin_width)))
 }
 
+#' @export
 get_chr_arm_bins <- function(bin_width){
   #https://www.biostars.org/p/383786/
   chr.cyto.dt <- data.table::fread("http://hgdownload.cse.ucsc.edu/goldenpath/hg38/database/cytoBand.txt.gz",
@@ -64,6 +65,7 @@ get_chr_arm_bins <- function(bin_width){
   lapply(chr.arm.coords, make_bins, bin_width)
 }
 
+#' @export
 get_peak_overlaps <- function(atac.granges, peak.granges, method){
   if (method == "PIC"){
     frag.starts <- GenomicRanges::resize(atac.granges, 1, fix = "start")
@@ -87,6 +89,7 @@ get_counts <- function(atac_fragments, bins){
   bin_tabs
 }
 
+#' @export
 get_bin_counts <- function(atac_fragments, chr_arm_bins, barcodes){
   atac_fragments_dt <- data.table::as.data.table(as.data.frame(atac_fragments))
   atac_chr_list <- split(atac_fragments_dt, atac_fragments_dt$seqnames)
@@ -125,88 +128,4 @@ get_atac_barcode_stats <- function(cr_arc_barcode_stats_path, cr_atac_barcode_st
   atac.barcode.info <- atac.barcode.info[arc.barcode.info$atac_barcode,]
 
   atac.barcode.info
-}
-
-#normalise_counts <- function(x, ){
-#
-#}
-
-simulate_counts <- function(x, overdispersion){
-  lib.sizes <- colSums(x)
-  gene.props <- rowSums(x) / sum(x)
-  mu.mat <- t(lib.sizes %*% t(gene.props))
-  mu.list <- as.list(as.data.frame(mu.mat))
-
-  sim.list <- list()
-  if (overdispersion == 0){
-    for (i in seq_along(mu.list)){
-      sim.list[[i]] <- lapply(mu.list[[i]], rpois, n = 1)
-    }
-  } else {
-    for (i in seq_along(mu.list)){
-      sim.list[[i]] <- lapply((1 / overdispersion) / (mu.list[[i]] + 1 / overdispersion), rnbinom, n = 1, size = 1 / overdispersion)
-    }
-  }
-  sim.mat <- do.call(cbind, lapply(sim.list, as.numeric))
-  rownames(sim.mat) <- rownames(x)
-  colnames(sim.mat) <- colnames(x)
-  sim.mat
-}
-
-permute_rows <- function(x){
-  x.permute <- do.call(rbind, lapply(as.list(as.data.frame(t(x))), sample))
-  rownames(x.permute) <- rownames(x)
-  colnames(x.permute) <- colnames(x)
-  x.permute
-}
-
-choose_pcs <- function(sdev_test, sdev_null, tolerance){
-  which(sapply(lapply(sdev_test, `<`, sdev_null), sum) <= tolerance)
-}
-
-get_internal_edges <- function(knn_graph, leiden_clusters){
-  cluster.ids <- sort(unique(leiden_clusters))
-  subgraph.list <- list()
-  for (i in cluster.ids){
-    subgraph.list[[i]] <- subgraph(knn_graph, which(leiden_clusters == i))
-  }
-  sum(sapply(subgraph.list, ecount))
-}
-
-sweep_leiden_resolution <- function(knn_graph, objective_function, leiden_resolutions, n_reps, n_iter){
-  require("igraph")
-  leiden_list <- list()
-  for (i in seq_along(leiden_resolutions)){
-    leiden_list[[i]] <- list()
-    for (j in (1:n_reps)){
-      leiden_list[[i]][[j]] <- cluster_leiden(knn_graph, objective_function = objective_function, resolution_parameter = leiden_resolutions[i], n_iterations = n_iter)
-    }
-  }
-  member_list <- lapply(leiden_list, lapply, membership)
-  edge_list <- lapply(member_list, sapply, get_internal_edges, knn_graph = knn_graph)
-  edge_list
-}
-
-choose_best_leiden_partition <- function(knn_graph, objective_function, leiden_resolution, n_reps, n_iter){
-  require("igraph")
-  leiden_list <- list()
-  for (i in (1:n_reps)){
-    leiden_list[[i]] <- cluster_leiden(knn_graph, objective_function = objective_function, resolution_parameter = leiden_resolution, n_iterations = n_iter)
-  }
-  leiden_quality <- sapply(leiden_list, function(x){x$quality})
-  best_idx <- which(order(leiden_quality, decreasing = T) == 1)
-  leiden_clusters <- membership(leiden_list[[best_idx]])
-  sorted_tabs <- sort(table(leiden_clusters), decreasing = T)
-  new_cluster_ids <- setNames(1:length(sorted_tabs), names(sorted_tabs))
-  factor(unname(new_cluster_ids[as.character(leiden_clusters)]), levels = 1:length(sorted_tabs))
-}
-
-get_barcode_probability <- function(barcodes, weights = rep(1, length(barcodes))){
-  barcode_1_9 <- substr(colnames(peak_counts), 1, 9)
-  barcode_1_9_tabs <- table(rep(barcode_1_9, weights))
-  barcode_1_9_probs <- (barcode_1_9_tabs / sum(barcode_1_9_tabs))[barcode_1_9]
-  barcode_8_16 <- substr(colnames(peak_counts), 8, 16)
-  barcode_8_16_tabs <- table(rep(barcode_8_16, weights))
-  barcode_8_16_probs <- (barcode_8_16_tabs / sum(barcode_8_16_tabs))[barcode_8_16]
-  setNames(barcode_1_9_probs * barcode_8_16_probs, barcodes)
 }

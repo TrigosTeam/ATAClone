@@ -36,7 +36,7 @@ get_copy_number <- function(count_matrix, clusters, ref.cluster, joint, ploidy.c
 }
 
 get_new_order <- function(cn.mat, count_matrix_cor, clusters){
-  #sort within clusteres based on corrected count matrix
+  #sort within clusters based on corrected count matrix
   hclust.list <- list()
   for (i in levels(clusters)){
     cell.dist <- dist(t(count_matrix_cor[,as.integer(clusters) == i]))
