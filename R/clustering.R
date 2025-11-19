@@ -53,7 +53,7 @@ scan_resolution <- function(knn.graph, start, stop, step, seed = NULL, n.iter = 
 }
 
 #' @export
-iterative_cluster_sim <- function(x, overdispersion, npcs, discard_pcs, k, start, stop, step, seed, iter.limit = 2, rename.clusters = T){
+iterative_cluster_sim <- function(x, overdispersion, npcs, discard_pcs, k, start = 0, stop = 2 * k, step = 1, seed = 100, iter.limit = 2, rename.clusters = T){
   set.seed(seed)
   x.norm.pca <- get_pca(normalise_counts(x, overdispersion), npcs)
   x.sim.norm.pca <- get_pca(normalise_counts(simulate_counts(x, overdispersion), overdispersion), npcs)
@@ -93,18 +93,37 @@ iterative_cluster_sim <- function(x, overdispersion, npcs, discard_pcs, k, start
 }
 
 #' @export
-get_cluster_outliers <- function(knn.graph, clusters, min_neighbour_quantile){
+get_umap <- function(pca_obj, npcs, discard_pcs){
+  use_pcs <- 1:npcs
+  use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
+  umap_embeddings <- uwot::umap(pca_obj[,use_pcs])
+  colnames(umap_embeddings) <- c("UMAP_1", "UMAP_2")
+  umap_embeddings
+}
+
+#' @export
+get_cluster_outliers <- function (pca_obj, clusters, npcs, discard_pcs, knn_k, min_neighbour_quantile){
+  use_pcs <- 1:npcs
+  use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
+  knn.graph <- scran::buildKNNGraph(t(pca_obj[,use_pcs]), k = knn_k, directed = F, d = NA)
   outlier.list <- list()
-  for (i in seq_along(levels(clusters))){
+  for (i in seq_along(levels(clusters))) {
     cluster.id <- levels(clusters)[i]
-    knn.subgraph <- igraph::subgraph(knn.graph, which(clusters == cluster.id))
-    neighbour.prop <- igraph::degree(knn.subgraph) / igraph::degree(knn.graph)[which(clusters == cluster.id)]
-    outlier.list[[cluster.id]] <- setNames(neighbour.prop < quantile(neighbour.prop, min_neighbour_quantile), names(clusters)[clusters == cluster.id])
+    knn.subgraph <- igraph::subgraph(knn.graph, which(clusters ==
+                                                        cluster.id))
+    neighbour.prop <- igraph::degree(knn.subgraph)/igraph::degree(knn.graph)[which(clusters ==
+                                                                                     cluster.id)]
+    outlier.list[[cluster.id]] <- setNames(neighbour.prop <
+                                             quantile(neighbour.prop, min_neighbour_quantile),
+                                           names(clusters)[clusters == cluster.id])
   }
-  is.outlier <- unlist(outlier.list)[paste0(clusters, ".", names(clusters))]
-  names(is.outlier) <- sapply(strsplit(names(is.outlier), "\\."), `[`, 2)
+  is.outlier <- unlist(outlier.list)[paste0(clusters, ".",
+                                            names(clusters))]
+  names(is.outlier) <- sapply(strsplit(names(is.outlier), "\\."),
+                              `[`, 2)
   is.outlier
 }
+
 
 #' @export
 simulate_counts <- function(x, overdispersion){
@@ -169,7 +188,7 @@ choose_best_leiden_partition <- function(knn_graph, objective_function, leiden_r
   factor(unname(new_cluster_ids[as.character(leiden_clusters)]), levels = 1:length(sorted_tabs))
 }
 
-#swtiched to pre-computed barcode probability
+#switched to pre-computed barcode probability
 get_barcode_probability <- function(barcodes, weights = rep(1, length(barcodes))){
   barcode_1_9 <- substr(colnames(peak_counts), 1, 9)
   barcode_1_9_tabs <- table(rep(barcode_1_9, weights))

@@ -129,3 +129,11 @@ get_atac_barcode_stats <- function(cr_arc_barcode_stats_path, cr_atac_barcode_st
 
   atac.barcode.info
 }
+
+#' @export
+read_matrix <- function(path){
+  x <- Matrix::readMM(paste0(path, "/matrix.mtx.gz"))
+  colnames(x) <- read.delim(paste0(path, "/barcodes.tsv.gz"), sep = "\t")[,1]
+  rownames(x) <- read.delim(paste0(path, "/features.tsv.gz"), sep = "\t")[,1]
+  as(x, "dgCMatrix")
+}

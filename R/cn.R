@@ -1,5 +1,5 @@
 get_copy_number <- function(count_matrix, clusters, ref.cluster, joint, ploidy.correction.method = "prop", external.ref = NULL){
-  require("MatrixGenerics")
+  #require("MatrixGenerics")
   #removed bias correction - need to investigate whether it improves calling. Scaling to mean in presence of zeroes may be a problem.
   cor.list <- list()
   if (is.null(ref.cluster) & !is.null(external.ref)){
@@ -100,7 +100,7 @@ get_cell_factor <- function(cn.mat, clusters){
   cluster.dist <- dist(t(cn.mat[,cluster.idx]), method = "manhattan")
   cluster.hclust <- hclust(cluster.dist, method = "complete")
   cluster.order <- names(cluster.idx)[cluster.hclust$order]
-  cluster.order <- c(ref.cluster, cluster.order[cluster.order != ref.cluster])
+  #cluster.order <- c(ref.cluster, cluster.order[cluster.order != ref.cluster])
   new.cluster.levels <- factor(clusters, levels = as.integer(cluster.order))
   new.cluster.levels
 }
@@ -139,10 +139,10 @@ get_purple_cn <- function(purple_path, bin.names){
 }
 
 #messy - need to fix
-get_new_hclust <- function(){
-  test_hclust <- hclust(dist(t(joint_cn_estimates[,new_cell_order]), method = "manhattan"), method = "single")
-  test_clusters <- cutree(test_hclust, length(levels(iterative.leiden.clusters)))
-  idx_split <- split(1:length(iterative.leiden.clusters), test_clusters[new_cell_order])
+get_new_hclust <- function(x, new_cell_order, clusters){
+  test_hclust <- hclust(dist(t(x[,new_cell_order]), method = "manhattan"), method = "single")
+  test_clusters <- cutree(test_hclust, length(levels(clusters)))
+  idx_split <- split(1:length(clusters), test_clusters[new_cell_order])
 
   get_cluster_merges <- function(cluster_indices, cluster_number){
     idx.split <- split(cluster_indices, seq_along(cluster_indices) > 3)
@@ -171,14 +171,14 @@ get_new_hclust <- function(){
     cbind(left.idx, right.idx)
   }
 
-  merge_list <- mapply(get_cluster_merges, idx_split, 1:length(levels(iterative.leiden.clusters)), SIMPLIFY = F)
+  merge_list <- mapply(get_cluster_merges, idx_split, 1:length(levels(clusters)), SIMPLIFY = F)
   #can't remember what this is
   #subgraph_indices <- sapply(merge_list, function(x){x[nrow(x),2] + 1})
   #make graphs of pseudo-bulk
-  use.clusters <- 1:length(levels(iterative.leiden.clusters))
+  use.clusters <- 1:length(levels(clusters))
   cluster.cn <- list()
   for (i in seq_along(use.clusters)){
-    cluster.cn[[i]] <- joint_cn_estimates[,iterative.leiden.clusters == use.clusters[i]][,1]
+    cluster.cn[[i]] <- x[,clusters == use.clusters[i]][,1]
   }
   cluster.cn <- do.call(cbind, cluster.cn)
   joint_hclust <- hclust(dist(t(cluster.cn), method = "manhattan"), "single")
@@ -221,4 +221,62 @@ get_new_hclust <- function(){
   new_merge2 <- rbind(do.call(rbind, merge_list), get_final_rows(merge_list, joint_hclust))
   test_hclust$merge <- new_merge2
   test_hclust
+}
+
+#' @export
+plot_copy_number <- function(x, external_ref, clusters, pca_obj, discard_pcs){
+  use_pcs <- 1:ncol(pca_obj$x)
+  use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
+
+  single_cn_estimates <- get_copy_number(x, clusters, ref.cluster = NULL, joint = F, external.ref = external_ref)
+  joint_cn_estimates <- get_copy_number(x, clusters, ref.cluster = NULL, joint = T, external.ref = external_ref)
+  #new_orders <- get_new_order(joint_cn_estimates, stable_counts_filtered_norm_cor, leiden_clusters)
+  new_feature_names <- get_new_feature_names(rownames(joint_cn_estimates))
+  feature_factor <- get_feature_factor(new_feature_names)
+
+  x_norm_cor_denoised <- t(pca_obj$x[,use_pcs] %*% t(pca_obj$rotation[,use_pcs]))
+  new_cell_order <- get_new_cell_order(joint_cn_estimates, x_norm_cor_denoised, leiden_clusters)
+  cell_factor <- get_cell_factor(joint_cn_estimates[,new_cell_order], clusters[new_cell_order])
+  chr_arm <- ComplexHeatmap::HeatmapAnnotation(chr_arm = get_chr_arms(new_feature_names), col = list(chr_arm = c(p = "black", q = "grey")), show_legend = F)
+
+  color_fun <- circlize::colorRamp2(breaks = c(0,2,4), colors = c("blue", "white", "red"))
+
+  use.clusters <- 1:length(levels(clusters))
+  cluster.cn <- list()
+  for (i in seq_along(use.clusters)){
+    cluster.cn[[i]] <- joint_cn_estimates[,clusters == use.clusters[i]][,1]
+  }
+  cluster.cn <- do.call(cbind, cluster.cn)
+  test_hclust <- get_new_hclust(joint_cn_estimates, new_cell_order, clusters)
+
+  ComplexHeatmap::Heatmap(t(as.matrix(single_cn_estimates[new_feature_names,][,new_cell_order])), cluster_rows = test_hclust, cluster_columns = F, column_split = feature_factor, row_labels = rep('', ncol(joint_cn_estimates)), column_labels = rep('', nrow(joint_cn_estimates)), border = T, col = color_fun, top_annotation = chr_arm, row_split = length(levels(leiden_clusters)), row_title = hclust(dist(t(cluster.cn), method = "manhattan"), "single")$order, heatmap_legend_param = list(title = "copy_number"))
+}
+
+#' @export
+get_absolute_copy_number <- function(x, clusters, ref_cluster, is_outlier, is_doublet, is_ref_female){
+  new_feature_names <- get_new_feature_names(rownames(x))
+  cn.list <- list()
+  for (i in levels(clusters)[levels(clusters) != ref_cluster]){
+    cn <- rowMeans(x[new_feature_names, clusters == i & !is_outlier & !is_doublet]) /
+      rowMeans(x[new_feature_names, clusters == ref_cluster & !is_outlier & !is_doublet])
+    chr <- gsub("chr", "", sapply(strsplit(new_feature_names, "\\."), `[`, 1))
+    chr_arm <- get_chr_arms(new_feature_names)
+    chr <- factor(chr, unique(chr))
+    cn <- ifelse(grepl("X|Y", chr) & !is_ref_female, 1, 2) * cn
+    cn.list[[i]] <- cn
+  }
+  cn <- rowMeans(x[new_feature_names, clusters != ref_cluster & !is_outlier & !is_doublet]) /
+    rowMeans(x[new_feature_names, clusters == ref_cluster & !is_outlier & !is_doublet])
+  chr <- factor(chr, unique(chr))
+  cn <- ifelse(grepl("X|Y", chr) & !is_ref_female, 1, 2) * cn
+  cn.list[["all"]] <- cn
+  cn.list
+}
+
+#' @export
+plot_absolute_cn <- function(x, cluster_name){
+  chr <- gsub("chr", "", sapply(strsplit(names(x), "\\."), `[`, 1))
+  chr <- factor(chr, unique(chr))
+  new_xs <- unlist(sapply(split(names(x), chr), function(x){1:length(x)}))
+  plot(ggplot(data.frame(cn = x, chr, new_xs), aes(x =new_xs, y = cn, color = chr)) + geom_point() + facet_grid(cols = vars(chr), space = "free", scales = "free") + theme(panel.spacing = unit(0, "lines"), panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(),panel.background = element_rect(color = "white"), strip.background=element_rect(color = "white"), axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank(), legend.position = "none") + scale_x_continuous(expand = expansion(add = 2)) + ylim(c(0,8)) + ggtitle(paste0("Absolute copy number (Cluster = ", cluster_name, ")")))
 }

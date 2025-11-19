@@ -8,4 +8,7 @@
 #' @import transformGamPoi
 #' @import irlba
 #' @import scran
+#' @import uwot
+#' @import reshape2
+#' @import ComplexHeatmap
 NULL
