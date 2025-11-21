@@ -1,4 +1,4 @@
-get_copy_number <- function(count_matrix, clusters, ref.cluster, joint, ploidy.correction.method = "prop", external.ref = NULL){
+get_copy_number <- function(count_matrix, clusters, ref.cluster, joint, is_ref_female, ploidy.correction.method = "prop", external.ref = NULL){
   #require("MatrixGenerics")
   #removed bias correction - need to investigate whether it improves calling. Scaling to mean in presence of zeroes may be a problem.
   cor.list <- list()
@@ -23,12 +23,12 @@ get_copy_number <- function(count_matrix, clusters, ref.cluster, joint, ploidy.c
   if (joint){
     for (i in levels(clusters)){
       cn.mat[,as.integer(clusters) == i] <- rep(2 * as.numeric(cor.list[[i]]) / as.numeric(cor.list[[ref.cluster]]), sum(as.integer(clusters) == i))
-      cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i] <- 0.5 * cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i]
+      cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i] <- ifelse(is_ref_female, 1, 0.5) * cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i]
     }
   } else {
     for (i in levels(clusters)){
       cn.mat[,as.integer(clusters) == i] <- 2 * cn.mat[,as.integer(clusters) == i] / as.numeric(cor.list[[ref.cluster]])
-      cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i] <- 0.5 * cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i]
+      cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i] <- ifelse(is_ref_female, 1, 0.5) * cn.mat[grep("^chrX|^chrY", rownames(cn.mat)),as.integer(clusters) == i]
     }
   }
   cn.mat[is.infinite(cn.mat)] <- NA
@@ -224,12 +224,12 @@ get_new_hclust <- function(x, new_cell_order, clusters){
 }
 
 #' @export
-plot_copy_number <- function(x, external_ref, clusters, pca_obj, discard_pcs){
+plot_copy_number <- function(x, external_ref, clusters, pca_obj, discard_pcs, is_ref_female){
   use_pcs <- 1:ncol(pca_obj$x)
   use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
 
-  single_cn_estimates <- get_copy_number(x, clusters, ref.cluster = NULL, joint = F, external.ref = external_ref)
-  joint_cn_estimates <- get_copy_number(x, clusters, ref.cluster = NULL, joint = T, external.ref = external_ref)
+  single_cn_estimates <- get_copy_number(x, clusters, ref.cluster = NULL, joint = F, external.ref = external_ref, is_ref_female = is_ref_female)
+  joint_cn_estimates <- get_copy_number(x, clusters, ref.cluster = NULL, joint = T, external.ref = external_ref, is_ref_female = is_ref_female)
   #new_orders <- get_new_order(joint_cn_estimates, stable_counts_filtered_norm_cor, leiden_clusters)
   new_feature_names <- get_new_feature_names(rownames(joint_cn_estimates))
   feature_factor <- get_feature_factor(new_feature_names)

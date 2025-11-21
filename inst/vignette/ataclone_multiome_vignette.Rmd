@@ -1,0 +1,417 @@
+---
+title: "ATAClone multiome demonstration"
+output: html_notebook
+---
+
+## Setup
+
+### Load libraries
+
+#### Code
+```{r}
+library("ATAClone")
+library("MatrixGenerics")
+library("ggplot2")
+```
+
+### Load datasets
+Loads ATAC and RNA data for the chosen dataset (installed with the package), as well as a normal reference ATAC dataset and other reference files.
+
+ATAC data is a matrix of genomic bin counts (rows) per cell (columns). "Stable" count matrices are computed by retaining only ATAC-seq fragments overlapping stably accessible regions, then computing bin counts. Matrices computed using all ATAC-seq fragments are also loaded here.
+
+RNA data is a matrix of gene counts (rows) per cell (columns). Intron and exon count matrices are computed using only reads mapping to intronic and exonic regions respectively, as determined by the molecule_info file output by Cell Ranger. 
+
+#### Parameters
+
+```{r}
+assay_type <- "scMultiome"
+#options:
+#10X_Human_Kidney_Cancer_Chromium_Nuclei_Isolation
+#10X_Human_Kidney_Cancer_CT_unsorted
+#10X_Human_Kidney_Cancer_CT_sorted
+#10X_Human_Kidney_Cancer_SaltyEZ
+dataset <- "10X_Human_Kidney_Cancer_Chromium_Nuclei_Isolation"
+```
+
+#### Code
+
+```{r}
+dataset_path <- paste0(find.package("ATAClone", quiet = TRUE), "/extdata/", assay_type, "/", dataset)
+
+#get paths for ATAC-related count matrices
+stable_path <- paste0(dataset_path, "/ATAC/stable")
+all_path <- paste0(dataset_path, "/ATAC/all")
+
+#get paths for RNA-related count matrices
+intron_path <- paste0(dataset_path, "/RNA/intron")
+exon_path <- paste0(dataset_path, "/RNA/exon")
+gex_path <- paste0(dataset_path, "/RNA/gex")
+
+#load ATAC-related matrices
+stable_counts <- read_matrix(stable_path)
+all_counts <- read_matrix(all_path)
+
+#load RNA-related matrices
+intron_counts <- read_matrix(intron_path)
+exon_counts <- read_matrix(exon_path)
+gex_counts <- read_matrix(gex_path)
+
+#Get barcodes with > 0 counts in both the ATAC and GEX assays
+shared_barcodes <- intersect(colnames(stable_counts), colnames(intron_counts))
+
+#load precomputed barcode probabilities
+data("barcode_probabilities")
+
+#get paths for normal reference ATAC-related count matrices
+ref_path <- paste0(find.package("ATAClone", quiet = TRUE), "/extdata/", assay_type, "/", "10X_Human_Jejunum_Chromium_Nuclei_Isolation")
+
+ref_stable_path <- paste0(ref_path, "/ATAC/stable")
+ref_all_path <- paste0(ref_path, "/ATAC/stable")
+
+#load normal reference ATAC-related matrices
+stable_counts_ref <- read_matrix(ref_stable_path)
+all_counts_ref <- read_matrix(ref_all_path)
+```
+
+## Quality control
+
+### Compute quality control statistics
+Computes various quality control statistics for the 10X multiome assay. These will be covered in more detail in the code blocks below.
+
+#### Code
+```{r}
+atac_stable_total <-  colSums(stable_counts)[shared_barcodes]
+atac_all_total <-  colSums(all_counts)[shared_barcodes]
+rna_intron_total <- colSums(intron_counts)[shared_barcodes]
+barcode_odds <- 735320 * barcode.probs[shared_barcodes]
+observed_non_zeros <- colSums(stable_counts[,shared_barcodes] != 0)
+expected_non_zeros <- get_expected_non_zeros(stable_counts[,shared_barcodes], 0.015)
+non_zero_residual <- observed_non_zeros - expected_non_zeros
+stable_frac <- colSums(stable_counts)[shared_barcodes] / colSums(all_counts)[shared_barcodes]
+
+qc_df <- data.frame(atac_stable_total,
+                    atac_all_total,
+                    rna_intron_total,
+                    barcode_odds,
+                    observed_non_zeros,
+                    expected_non_zeros,
+                    non_zero_residual,
+                    stable_frac
+)
+```
+
+### "Library size" filtering
+Droplets containing intact cells (or nuclei in this case) are easily distinguished from background empty droplets/debris based on their DNA (from ATAC-seq) and RNA (from RNA-seq) content.
+
+As we are working with nuclei here, we compute total RNA counts from only the intronic regions as these are generally only present in nuclear RNA and are not present in background cytoplasmic debris.
+
+ATAC-seq counts are computed from only the "stably-accessible" regions because, as we will see later, total ATAC-seq counts vary technically.
+
+#### Parameters
+
+```{r}
+min_stable_total <- 300
+min_intron_total <- 300
+```
+
+#### Code
+
+```{r}
+ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = stable_frac)) + geom_point() +
+  scale_x_log10() + scale_y_log10() + scale_color_gradient(low = "blue", high = "yellow") + 
+  geom_vline(xintercept = min_stable_total) + geom_hline(yintercept = min_intron_total)
+```
+
+### "Barcode odds" filtering
+In the 10X multiome assay, some cell barcode sequences have a lower probability of being detected on the ATAC-seq side (having > 0 ATAC-seq fragments). If they appear, they also have lower than expected ATAC-seq fragment counts. 
+
+ATAClone includes a pre-computed estimate of each "barcode probability" - the probability that a cell barcode will be detected. The "barcode odds" are the ratio of these probabilities to a probability under the assumption of equal likelihood (i.e. 1 / 735320).
+
+#### Parameters
+
+```{r}
+min_barcode_odds <- 0.95
+```
+
+#### Code
+
+```{r}
+ggplot(qc_df, aes(x = barcode_odds)) + geom_histogram() + geom_vline(xintercept = min_barcode_odds)
+ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = barcode_odds > min_barcode_odds)) + geom_point() +
+  scale_x_log10() + scale_y_log10() + geom_vline(xintercept = min_stable_total) + 
+  geom_hline(yintercept = min_intron_total)
+```
+
+### Debris filtering
+Single-cell assays generally contain some cell/nuclear debris. In the 10X multiome assay, these can be detected visually as the droplets with simultaneously lower DNA and RNA counts. They are easily detected automatically by the number of zero counts they contain across their genomic bins. That these droplets also contain low fractions of reads in stably-accessible regions (a subset of all peak regions) suggests that this debris may be generated by apoptosis where chromatin condensation is a hallmark.
+
+#### Parameters
+
+```{r}
+#the minimum difference between the observed and expected number of non-zero bin counts to be retained
+min_non_zero_residual <- -14
+```
+
+#### Code
+
+```{r}
+ggplot(qc_df, aes(x = expected_non_zeros, y = observed_non_zeros, color = non_zero_residual)) + geom_point() + 
+  scale_color_gradient(low = "blue", high = "yellow") + geom_abline(intercept = min_non_zero_residual, slope = 1)
+ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = non_zero_residual > min_non_zero_residual)) + geom_point() +
+  scale_x_log10() + scale_y_log10() + geom_vline(xintercept = min_stable_total) + 
+  geom_hline(yintercept = min_intron_total)
+```
+
+### Stable fraction filtering
+We know from bulk ATAC-seq experiments that increasing the concentration of transposase or the exposure time to transposase increases the fraction of ATAC-seq fragments mapping to peak regions. This needs to be corrected when comparing different bulk ATAC-seq experiments. Likewise, different droplets in a single-cell experiment have different transposition efficiencies and contain different fractions of ATAC-seq fragments mapping to peak regions (the fraction of counts in stably-accessible regions is a proxy for this). Note that when using all ATAC-seq fragments, total DNA decreases as the transposition efficiency increases (see the plot below).
+
+Computing bin counts from stably-accessible regions is generally sufficient to remove most transposition efficiency bias. However, droplets with a low transposition efficiency (low stable fraction) sometimes look artificially different and can be removed.
+
+This is OPTIONAL. In some cases, it can remove cell types of interest. It is also possible to correct this effect downstream at the PCA step. If intending to filter by stable fraction, a reasonable starting point might be the minimum fraction to exclude nuclear debris, measured as before by low non-zero counts.
+
+#### Parameters
+
+```{r}
+min_stable_frac <- 0
+```
+
+#### Code
+
+```{r}
+ggplot(qc_df, aes(x = stable_frac, y = atac_stable_total, color = non_zero_residual > min_non_zero_residual)) + geom_point() + scale_y_log10() + geom_vline(xintercept = min_stable_frac)
+ggplot(qc_df, aes(x = stable_frac, y = atac_all_total, color = non_zero_residual > min_non_zero_residual)) + geom_point() + 
+  scale_y_log10() + geom_vline(xintercept = min_stable_frac)
+```
+
+### Final filtering
+We apply all of our filtering parameters here.
+
+#### Code
+
+```{r}
+is_retained <- colSums(stable_counts)[shared_barcodes] > min_stable_total & 
+  colSums(intron_counts)[shared_barcodes] > min_intron_total &
+  barcode_odds > min_barcode_odds & 
+  non_zero_residual > min_non_zero_residual
+
+ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = is_retained)) + geom_point() +
+  scale_x_log10() + scale_y_log10() + geom_vline(xintercept = min_stable_total) + 
+  geom_hline(yintercept = min_intron_total)
+
+retained_barcodes <- shared_barcodes[which(is_retained)]
+
+#filter ATAC count matrices
+stable_counts_filtered <- stable_counts[,retained_barcodes]
+all_counts_filtered <- all_counts[,retained_barcodes]
+
+#filter RNA count matrices
+intron_counts_filtered <- intron_counts[, retained_barcodes]
+exon_counts_filtered <- exon_counts[, retained_barcodes]
+gex_counts_filtered <- gex_counts[, retained_barcodes]
+
+#filter some QC metrics (we'll come back to them later)
+stable_frac_filtered <- stable_frac[retained_barcodes]
+atac_stable_total_filtered <- atac_stable_total[retained_barcodes]
+atac_all_total_filtered <- atac_all_total[retained_barcodes]
+```
+
+### Aside: why use counts of stably-accesible regions?
+As mentioned previously, there is technical variation in transposition efficiency across a single-cell experiment. This is mostly eliminated by only counting fragments overlapping stably accessible regions. When counting all fragments, it introduces complex biases in the proportions of fragments mapping to different bins which are difficult to correct. We demonstrate this below by fitting Poisson regression of the proportion of each bin to the per-cell fraction of counts in stably-accessible regions. In general, bins containing higher fractions of reads mapping to stably-accesible regions increase in proportion as the transposition frequency increases, while bins containing lower fractions of reads mapping to stably-accesible regions decrease in proportion.
+
+#### Code
+
+```{r}
+pred_frac_stable <- fit_stable_frac_regression(stable_counts_filtered, stable_counts_filtered, all_counts_filtered)
+pred_frac_all <- fit_stable_frac_regression(all_counts_filtered, stable_counts_filtered, all_counts_filtered)
+
+ggplot(pred_frac_stable, aes(x = cell_stable_frac, y = pred_bin_frac, group = bin, color = bin_stable_frac)) + geom_line() + scale_color_gradient(low = "blue", high = "yellow")
+ggplot(pred_frac_all, aes(x = cell_stable_frac, y = pred_bin_frac, group = bin, color = bin_stable_frac)) + geom_line() + scale_color_gradient(low = "blue", high = "yellow")
+```
+
+## Clone identification
+
+### Normalisation
+ATAClone adopts the position that variance-stabilising transformations have ideal properties for normalisation: by equalising random noise, features are weighted only by their variance *exceeding* random noise when finding a new representation by principal component analysis. These principal components may represent both biological factors of interest and unwanted technical variation. 
+
+To determine whether a transformation is variance-stabilising, we must first assume a mean-variance relationship. Here, we assume the negative binomial mean-variance relationship σ^2=μ^2+αμ^2 where α=0.015, which is stabilised by the acosh transformation (Ahlmann-Eltze and Huber, 2023). We must also identify a set of principal components which represent unwanted technical variation (we will verify this selection in the next section). 
+
+After applying the variance-stabilising transformation and correcting for these principal components, we can verify whether the normalised data has stable variance based on whether it closely approximates simulated data after normalisation (drawn as the fitted line on the plot below).
+
+#### Parameters
+
+```{r}
+nb_overdispersion <- 0.015
+discard_pcs <- c(1,2)
+npcs <- 25
+```
+
+#### Code
+
+```{r}
+loess_mean_var <- fit_sim_mean_var(stable_counts_filtered, nb_overdispersion)
+
+stable_counts_filtered_norm <- normalise_counts(stable_counts_filtered, nb_overdispersion)
+stable_counts_filtered_norm_cor <- correct_normalised_counts(stable_counts_filtered_norm, discard_pcs)
+
+norm_df <- data.frame(mean = rowMeans(stable_counts_filtered_norm_cor), var = rowVars(stable_counts_filtered_norm_cor))
+ggplot(norm_df, aes(x = mean, y = var)) + geom_point() + stat_function(fun = function(x){predict(loess_mean_var, x)})
+```
+
+### PCA
+We have already assumed a set of principal components represent unwanted technical variation in the previous section. Here we verify this selection by comparing to known scATAC-seq technical factors. 
+
+Because our normalisation method does not scale out "library size", PC1 invariably corresponds to total DNA and should be discarded. In some cases, using stably-accessible regions is insufficient to remove the effect of transposition efficiency. When this occurs, it will be seen in the leading principal components as a PC correlating to the fraction of reads in stably-accessible regions. If there is no PC with a high correlation (say, > 0.4), then it may not be necessary to discard any PCs.
+
+#### Code
+
+```{r}
+stable_counts_filtered_norm_pca <- get_pca(stable_counts_filtered_norm, npcs)
+
+stable_total_cor <- cor(stable_counts_filtered_norm_pca$x, sqrt(atac_stable_total_filtered))[,1]
+stable_frac_cor <- cor(stable_counts_filtered_norm_pca$x, stable_frac_filtered)[,1]
+
+pca_df <- data.frame(pc = 1:npcs, stable_total_cor, stable_frac_cor)
+pca_df2 <- data.frame(stable_counts_filtered_norm_pca$x, sqrt_stable_total = sqrt(atac_stable_total_filtered), stable_frac = stable_frac_filtered)
+
+ggplot(pca_df, aes(x = pc, y = stable_total_cor, fill = abs(stable_total_cor))) + geom_col() + 
+  ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
+best_pc <- paste0("PC", order(abs(pca_df$stable_total_cor), decreasing = T)[1])
+ggplot(pca_df2, aes(x = sqrt_stable_total, y = get(best_pc))) + geom_point() + ylab(best_pc)
+
+ggplot(pca_df, aes(x = pc, y = stable_frac_cor, fill = abs(stable_frac_cor))) + geom_col() + 
+  ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
+best_pc2 <- paste0("PC", order(abs(pca_df$stable_frac_cor), decreasing = T)[1])
+ggplot(pca_df2, aes(x = stable_frac, y = get(best_pc2))) + geom_point() + ylab(best_pc2)
+```
+
+### Graph-based clustering
+ATAClone identifies tumour clones based on graph-based clustering. Briefly, we build a KNN-graph based on the PCA embeddings we previously computed (excluding unwanted technical factors). Then, based on the mean-variance relationship we previously assumed, we simulate homogeneous count data, perform normalisation and dimensionality reduction, and build a second "null" KNN-graph. Using this "null" KNN-graph, we iterate over clustering resolution parameters until we find the highest resolution parameter within a user-specified "tolerance" (the proportion of cells not assigned to the largest cluster). We then use this resolution to perform graph-based clustering on the KNN graph of our original data. This procedure is then repeated recursively (by default, just one more time). For a more in-depth exploration of the clustering parameters, refer to the clustering vignette.
+
+After deriving the clones, we verify that they are not explained by unwanted technical variation by visualising known technical factors on the UMAP representation of the data. We will verify that each "clone" is explained by copy number differences in the next section.
+
+#### Parameters
+
+```{r}
+knn_k <- 11
+```
+
+#### Code
+
+```{r}
+leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, npcs, discard_pcs, knn_k)
+umap_embeddings <- get_umap(stable_counts_filtered_norm_pca$x, npcs, discard_pcs)
+cluster_outliers <- get_cluster_outliers(stable_counts_filtered_norm_pca$x, leiden_clusters, npcs, discard_pcs, knn_k, 0.2)
+
+cluster_df <- data.frame(umap_embeddings, cluster = leiden_clusters, stable_total = atac_stable_total_filtered, stable_frac = stable_frac_filtered, is_outlier = cluster_outliers)
+ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = cluster)) + geom_point()
+ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = stable_total)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow", trans = "log10")
+ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = stable_frac)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow")
+ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = is_outlier)) + geom_point()
+```
+
+### Copy number visualisation
+To verify that tumour "clones" have genuine copy number differences, we estimate and visualise copy number. Here, copy number is estimated based on an external non-tumour reference. Clusters are sorted based on hierarchical clustering of the average of their copy number estimates; within each cluster, cells are sorted by hierarchical clustering of their PCA embeddings to help visually detect additional sub-cluster copy number variants. Non-tumour cells appear as clusters of cells with relatively uniform copy number profiles. 
+
+Importantly, the copy number estimates visualised here are only "relative" as opposed to "absolute". That is, copy number is scaled to be approximately diploid on average, even if a tumour is polyploid on average. Later sections investigate obtaining absolute copy number estimates.
+
+#### Code
+
+```{r}
+stable_counts_ref <- stable_counts_ref[,colSums(stable_counts_ref) > 1000]
+plot_copy_number(stable_counts_filtered, stable_counts_ref, leiden_clusters, stable_counts_filtered_norm_pca, discard_pcs, is_ref_female = T)
+```
+
+## Downstream Analysis
+
+### scRNA-seq normalisation
+In general, the same principles we applied to derive our clones are also applicable to analysing scRNA-seq data. In fact, many ATAClone functions will work with scRNA-seq data.
+
+Here, we identify total RNA and the fraction of RNA-seq reads mapping to introns as unwanted technical factors. The latter may correspond to variation in the efficiency of nuclear isolation - when the cytoplasm is incompletely removed, the proportion of cytoplasmic RNA is higher and the fraction of reads in introns is lower.
+
+#### Code
+
+```{r}
+gex_counts_filtered_norm <- normalise_counts(gex_counts_filtered, 0.1)
+gex_counts_filtered_norm_pca <- get_pca(gex_counts_filtered_norm, npcs)
+
+gex_total_cor <- cor(gex_counts_filtered_norm_pca$x, sqrt(colSums(gex_counts_filtered)))[,1]
+intron_frac_cor <- cor(gex_counts_filtered_norm_pca$x, colSums(intron_counts_filtered) / colSums(gex_counts_filtered))[,1]
+
+pca_df <- data.frame(pc = 1:npcs, gex_total_cor, intron_frac_cor)
+pca_df2 <- data.frame(gex_counts_filtered_norm_pca$x, sqrt_gex_total = sqrt(colSums(gex_counts_filtered)), intron_frac = colSums(intron_counts_filtered) / colSums(gex_counts_filtered))
+
+ggplot(pca_df, aes(x = pc, y = gex_total_cor, fill = abs(gex_total_cor))) + geom_col() + 
+  ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
+best_pc <- paste0("PC", order(abs(pca_df$gex_total_cor), decreasing = T)[1])
+ggplot(pca_df2, aes(x = sqrt_gex_total, y = get(best_pc))) + geom_point() + ylab(best_pc)
+
+ggplot(pca_df, aes(x = pc, y = intron_frac_cor, fill = abs(intron_frac_cor))) + geom_col() + 
+  ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
+best_pc2 <- paste0("PC", order(abs(pca_df$intron_frac_cor), decreasing = T)[1])
+ggplot(pca_df2, aes(x = intron_frac, y = get(best_pc2))) + geom_point() + ylab(best_pc2)
+```
+
+
+### Orthogonal scRNA-seq analysis
+As copy number generally influences gene expression, we might expect clones to cluster separately based on gene expression too. Using cell annotation methods, we can also verify that the tumour and non-tumour cells have the expected cell identities.
+
+#### Code
+
+```{r}
+gex_umap_embeddings <- get_umap(gex_counts_filtered_norm_pca$x, 25, discard_pcs = c(1,2))
+ggplot(data.frame(gex_umap_embeddings, cluster = leiden_clusters), aes(x = UMAP_1, y = UMAP_2, color = cluster)) + geom_point()
+
+#load Seurat to use Azimuth for cell annotation
+library("Seurat")
+seurat_object <- Seurat::CreateSeuratObject(gex_counts_filtered)
+seurat_object <- Azimuth::RunAzimuth(seurat_object, reference = "kidneyref")
+
+ggplot(data.frame(gex_umap_embeddings, cell.type = seurat_object$predicted.annotation.l2), aes(x = UMAP_1, y = UMAP_2, color = cell.type)) + geom_point()
+```
+
+
+### Doublet detection
+After accounting for "low probability" barcodes, it is clear that total RNA and total DNA (as measured by ATAC-seq) are positively correlated. One explanation for this is the occurence of doublets/multiplets in droplet-based single-cell sequencing. An advantage of this approach over traditional doublet-calling methods is that it allows identification of "homotypic" doublets consisting of two cells of the same type. However, if an experiment contains genuine mixtures of cells of different ploidies, then these high-ploidy cells would also be removed.
+
+Here we specify a total stable count threshold for each clone, above which droplets are considered to be doublets/multiplets.
+
+#### Parameters
+
+```{r}
+#the minimum total stable count in a cell of cluster i to be considered a doublet/multiplet
+#make sure there is one entry for each cluster!
+doublet_thresholds <- c(10 ** 3.65, 10 ** 3.65, 10 ** 3.8, 10 ** 3.65)
+```
+
+#### Code
+
+```{r}
+is_doublet <- logical(length(leiden_clusters))
+for (i in levels(leiden_clusters)){
+  is_doublet[leiden_clusters == i] <- colSums(stable_counts_filtered[,leiden_clusters == i]) > doublet_thresholds[as.integer(i)]
+  doublet_df <- data.frame(atac.peak.count = colSums(stable_counts_filtered[,leiden_clusters == i & !cluster_outliers]), 
+                           rna.intron.count = colSums(intron_counts_filtered[,leiden_clusters == i & !cluster_outliers]),
+                           is.doublet = is_doublet[leiden_clusters == i & !cluster_outliers]
+  )
+  plot(ggplot(doublet_df, aes(x = atac.peak.count, y = rna.intron.count, color = is.doublet)) + geom_point() + scale_x_log10() + scale_y_log10())
+}
+```
+
+### Absolute copy number estimation
+Given the correlation between total RNA and total DNA (as measured by ATAC-seq), we might also assume that we can estimate copy number absolutely by using the non-tumour cells from the same experiment as our normal reference. Estimates may be confounded if the normal reference cells are polyploid. However, this is generally thought to be rare.
+
+#### Code
+```{r}
+absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 3, cluster_outliers, is_doublet, T)
+for (i in seq_along(absolute_cn_list)){
+  plot_absolute_cn(absolute_cn_list[[i]], names(absolute_cn_list)[i])
+}
+```
+
+## Session Information
+
+#### Code
+
+```{r}
+sessionInfo()
+```
