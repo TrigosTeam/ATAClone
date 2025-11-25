@@ -130,7 +130,7 @@ ATAClone includes a pre-computed estimate of each "barcode probability" - the pr
 #### Parameters
 
 ```{r}
-min_barcode_odds <- 0.95
+min_barcode_odds <- 1
 ```
 
 #### Code
@@ -149,7 +149,7 @@ Single-cell assays generally contain some cell/nuclear debris. In the 10X multio
 
 ```{r}
 #the minimum difference between the observed and expected number of non-zero bin counts to be retained
-min_non_zero_residual <- -14
+min_non_zero_residual <- -12
 ```
 
 #### Code
@@ -165,7 +165,7 @@ ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = non_zero_
 ### Stable fraction filtering
 We know from bulk ATAC-seq experiments that increasing the concentration of transposase or the exposure time to transposase increases the fraction of ATAC-seq fragments mapping to peak regions. This needs to be corrected when comparing different bulk ATAC-seq experiments. Likewise, different droplets in a single-cell experiment have different transposition efficiencies and contain different fractions of ATAC-seq fragments mapping to peak regions (the fraction of counts in stably-accessible regions is a proxy for this). Note that when using all ATAC-seq fragments, total DNA decreases as the transposition efficiency increases (see the plot below).
 
-Computing bin counts from stably-accessible regions is generally sufficient to remove most transposition efficiency bias. However, droplets with a low transposition efficiency (low stable fraction) sometimes look artificially different and can be removed.
+Computing bin counts from stably-accessible regions is generally sufficient to remove most transposition efficiency bias (we will revisit this below). However, droplets with a low transposition efficiency (low stable fraction) sometimes look artificially different and can be removed.
 
 This is OPTIONAL. In some cases, it can remove cell types of interest. It is also possible to correct this effect downstream at the PCA step. If intending to filter by stable fraction, a reasonable starting point might be the minimum fraction to exclude nuclear debris, measured as before by low non-zero counts.
 
@@ -178,8 +178,13 @@ min_stable_frac <- 0
 #### Code
 
 ```{r}
-ggplot(qc_df, aes(x = stable_frac, y = atac_stable_total, color = non_zero_residual > min_non_zero_residual)) + geom_point() + scale_y_log10() + geom_vline(xintercept = min_stable_frac)
-ggplot(qc_df, aes(x = stable_frac, y = atac_all_total, color = non_zero_residual > min_non_zero_residual)) + geom_point() + 
+qc_df$type <- rep("retain", length(shared_barcodes))
+qc_df$type[qc_df$rna_intron_total < min_intron_total] <- "empty"
+qc_df$type[qc_df$barcode_odds < min_barcode_odds] <- "low_prob"
+qc_df$type[non_zero_residual < min_non_zero_residual] <- "debris"
+
+ggplot(qc_df, aes(x = stable_frac, y = atac_stable_total, color = type)) + geom_point() + scale_y_log10() + geom_vline(xintercept = min_stable_frac)
+ggplot(qc_df, aes(x = stable_frac, y = atac_all_total, color = type)) + geom_point() + 
   scale_y_log10() + geom_vline(xintercept = min_stable_frac)
 ```
 
@@ -216,7 +221,7 @@ atac_all_total_filtered <- atac_all_total[retained_barcodes]
 ```
 
 ### Aside: why use counts of stably-accesible regions?
-As mentioned previously, there is technical variation in transposition efficiency across a single-cell experiment. This is mostly eliminated by only counting fragments overlapping stably accessible regions. When counting all fragments, it introduces complex biases in the proportions of fragments mapping to different bins which are difficult to correct. We demonstrate this below by fitting Poisson regression of the proportion of each bin to the per-cell fraction of counts in stably-accessible regions. In general, bins containing higher fractions of reads mapping to stably-accesible regions increase in proportion as the transposition frequency increases, while bins containing lower fractions of reads mapping to stably-accesible regions decrease in proportion.
+As mentioned previously, there is technical variation in transposition efficiency across a single-cell experiment. This is mostly eliminated by only counting fragments overlapping stably-accessible regions. When counting all fragments, it introduces complex biases in the proportions of fragments mapping to different bins which are difficult to correct. We demonstrate this below by fitting Poisson regression of the proportion of each bin to the per-cell fraction of counts in stably-accessible regions. In general, bins containing higher fractions of reads mapping to stably-accessible regions increase in proportion as the transposition frequency increases, while bins containing lower fractions of reads mapping to stably-accesible regions decrease in proportion.
 
 #### Code
 
@@ -371,7 +376,7 @@ ggplot(data.frame(gex_umap_embeddings, cell.type = seurat_object$predicted.annot
 
 
 ### Doublet detection
-After accounting for "low probability" barcodes, it is clear that total RNA and total DNA (as measured by ATAC-seq) are positively correlated. One explanation for this is the occurence of doublets/multiplets in droplet-based single-cell sequencing. An advantage of this approach over traditional doublet-calling methods is that it allows identification of "homotypic" doublets consisting of two cells of the same type. However, if an experiment contains genuine mixtures of cells of different ploidies, then these high-ploidy cells would also be removed.
+After accounting for "low probability" barcodes, it is clear that total RNA and total DNA (as measured by ATAC-seq) are positively correlated. One explanation for this is the occurrence of doublets/multiplets in droplet-based single-cell sequencing. An advantage of this approach over traditional doublet-calling methods is that it allows identification of "homotypic" doublets consisting of two cells of the same type. However, if an experiment contains genuine mixtures of cells of different ploidies, then these high-ploidy cells would also be removed.
 
 Here we specify a total stable count threshold for each clone, above which droplets are considered to be doublets/multiplets.
 
@@ -380,7 +385,7 @@ Here we specify a total stable count threshold for each clone, above which dropl
 ```{r}
 #the minimum total stable count in a cell of cluster i to be considered a doublet/multiplet
 #make sure there is one entry for each cluster!
-doublet_thresholds <- c(10 ** 3.65, 10 ** 3.65, 10 ** 3.8, 10 ** 3.65)
+doublet_thresholds <- c(10 ** 3.75, 10 ** 3.75, 10 ** 3.75, 10 ** 3.75, 10 ** 3.75)
 ```
 
 #### Code
