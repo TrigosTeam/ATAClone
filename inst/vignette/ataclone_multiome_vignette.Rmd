@@ -392,7 +392,7 @@ Here we specify a total stable count threshold for each clone, above which dropl
 ```{r}
 #the minimum total stable count in a cell of cluster i to be considered a doublet/multiplet
 #make sure there is one entry for each cluster!
-doublet_thresholds <- c(10 ** 3.7, 10 ** 3.7, 10 ** 3.7, 10 ** 3.7)
+doublet_thresholds <- c(10 ** 3.7, 10 ** 3.7, 10 ** 3.7, 10 ** 3.85)
 ```
 
 #### Code
