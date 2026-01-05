@@ -253,11 +253,12 @@ plot_copy_number <- function(x, external_ref, clusters, pca_obj, discard_pcs, is
 }
 
 #' @export
-get_absolute_copy_number <- function(x, clusters, ref_cluster, is_outlier, is_doublet, is_ref_female){
+get_absolute_copy_number <- function(x, clusters, ref_cluster, scale_factors, is_outlier, is_doublet, is_ref_female){
   new_feature_names <- get_new_feature_names(rownames(x))
   cn.list <- list()
   for (i in levels(clusters)[levels(clusters) != ref_cluster]){
-    cn <- rowMeans(x[new_feature_names, clusters == i & !is_outlier & !is_doublet]) /
+    sf <- scale_factors[paste0("cluster_", i)]
+    cn <- sf * rowMeans(x[new_feature_names, clusters == i & !is_outlier & !is_doublet]) /
       rowMeans(x[new_feature_names, clusters == ref_cluster & !is_outlier & !is_doublet])
     chr <- gsub("chr", "", sapply(strsplit(new_feature_names, "\\."), `[`, 1))
     chr_arm <- get_chr_arms(new_feature_names)
@@ -265,7 +266,7 @@ get_absolute_copy_number <- function(x, clusters, ref_cluster, is_outlier, is_do
     cn <- ifelse(grepl("X|Y", chr) & !is_ref_female, 1, 2) * cn
     cn.list[[i]] <- cn
   }
-  cn <- rowMeans(x[new_feature_names, clusters != ref_cluster & !is_outlier & !is_doublet]) /
+  cn <- colMeans(scale_factors[paste0("cluster_", clusters[!is_outlier & !is_doublet & clusters != ref_cluster])] * t(x[new_feature_names, clusters != ref_cluster & !is_outlier & !is_doublet])) /
     rowMeans(x[new_feature_names, clusters == ref_cluster & !is_outlier & !is_doublet])
   chr <- factor(chr, unique(chr))
   cn <- ifelse(grepl("X|Y", chr) & !is_ref_female, 1, 2) * cn
@@ -279,4 +280,176 @@ plot_absolute_cn <- function(x, cluster_name){
   chr <- factor(chr, unique(chr))
   new_xs <- unlist(sapply(split(names(x), chr), function(x){1:length(x)}))
   plot(ggplot(data.frame(cn = x, chr, new_xs), aes(x =new_xs, y = cn, color = chr)) + geom_point() + facet_grid(cols = vars(chr), space = "free", scales = "free") + theme(panel.spacing = unit(0, "lines"), panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(),panel.background = element_rect(color = "white"), strip.background=element_rect(color = "white"), axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank(), legend.position = "none") + scale_x_continuous(expand = expansion(add = 2)) + ylim(c(0,8)) + ggtitle(paste0("Absolute copy number (Cluster = ", cluster_name, ")")))
+}
+
+get_mse_difs <- function(x, y, sfs, bin_weights, x_var, y_var){
+  mses <- numeric(length(sfs))
+  for (i in seq_along(sfs)){
+    sf <- sfs[i]
+    dif.rounded <- round(sf * x - y)
+    new_x_var <- (sf ** 2) * x_var
+    sum_var <- new_x_var + y_var
+    precision_weights <- 1 / sum_var
+    mses[i] <- weighted.mean((sf * x - y - dif.rounded) ** 2, bin_weights * precision_weights)
+  }
+  #cn.estimates <- lapply(sfs, `*`, ratio)
+  #is.excluded <- sapply(cn.estimates, median) < 1.5
+  #mses[is.excluded] <- NA
+  mses
+}
+
+get_mse <- function(ratio, sfs1, sfs2, bin_weights){
+  sfs <- sfs1 / sfs2
+  mses <- numeric(length(sfs))
+  for (i in seq_along(sfs)){
+    sf <- sfs[i]
+    ratio.rounded <- round(sf * ratio)
+    mses[i] <- weighted.mean((sf * ratio - ratio.rounded) ** 2, bin_weights)
+  }
+  cn.estimates <- lapply(sfs, `*`, ratio)
+  is.excluded <- sapply(cn.estimates, median) < 1.5
+  mses[is.excluded] <- NA
+  mses
+}
+
+bootstrap_cluster_means <- function(x, n_bootstrap){
+  bootstrap_means <- list()
+  for (i in 1:n_bootstrap){
+    bootstrap_means[[i]] <- rowMeans(x[,sample(1:ncol(x), replace = T)])
+  }
+  do.call(cbind, bootstrap_means)
+}
+
+get_mse_x_ref <- function(x, clusters, bootstrap_mean_list, x_idx, ref_cluster, is_ref_female, n_bootstrap, sfs, weight_by_precision, weight_by_cluster){
+  x_mean <- rowMeans(x[,clusters == x_idx])
+  ref_mean <- rowMeans(x[,clusters == ref_cluster])
+  x_ref_bootstrap <- bootstrap_mean_list[[x_idx]] / bootstrap_mean_list[[ref_cluster]]
+  if (!is_ref_female){
+    x_ref_bootstrap[grepl("chrX|chrY", rownames(x_ref_bootstrap))] <- 0.5 * x_ref_bootstrap[grepl("chrX|chrY", rownames(x_ref_bootstrap))]
+  }
+  x_ref_bootstrap[is.na(x_ref_bootstrap)] <- Inf
+  x_ref_var <- rowVars(x_ref_bootstrap)
+  is_excluded_x <- x_ref_var == 0 | rowSums(is.infinite(x_ref_bootstrap) > 0) | ref_mean < 2
+  x_ref_ratio <- 2 * (x_mean / ref_mean)
+  if (!is_ref_female){
+    x_ref_ratio[grepl("chrX|chrY", names(x_ref_ratio))] <- 0.5 * x_ref_ratio[grepl("chrX|chrY", names(x_ref_ratio))]
+  }
+
+  x_ref_precision_weights <- 1 / x_ref_var[!is_excluded_x]
+  x_ref_precision_weights <- length(x_ref_precision_weights) * x_ref_precision_weights / sum(x_ref_precision_weights)
+  x_ref_precision_weights2 <- 1 / rowVars(log(x_ref_bootstrap[!is_excluded_x,] + 0.01))
+  x_ref_precision_weights2 <- length(x_ref_precision_weights2) * x_ref_precision_weights2 / sum(x_ref_precision_weights2)
+
+  if (weight_by_cluster){
+    x_clusters <- Ckmeans.1d.dp::Ckmeans.1d.dp(log(x_ref_ratio[!is_excluded_x] + 0.01), y = x_ref_precision_weights2)
+    x_cluster_weights <- (1 / table(x_clusters$cluster))[as.character(x_clusters$cluster)]
+  } else{
+    x_cluster_weights <- 1
+  }
+
+  if (weight_by_precision){
+    x_ref_weights <- x_cluster_weights * x_ref_precision_weights
+  }
+
+  x_mse <- get_mse(x_ref_ratio[!is_excluded_x], sfs, 1, x_ref_weights)
+  cn_clusters <- rep(NA, length(is_excluded_x))
+  cn_clusters[!is_excluded_x] <- x_clusters$cluster
+  cluster_weights <- rep(NA, length(is_excluded_x))
+  cluster_weights[!is_excluded_x] <- x_cluster_weights
+  list(mses = setNames(x_mse, sfs), ratio = x_ref_ratio, bootstrap_mat = x_ref_bootstrap, is_excluded = is_excluded_x, clusters = cn_clusters, cluster_weights = cluster_weights)
+}
+
+#' @export
+fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded, n_bootstrap, sf_start, sf_end, sf_step, weight_by_precision, weight_by_cluster){
+  x <- x[, !is_excluded]
+  clusters <- clusters[!is_excluded]
+  bootstrap_mean_list <- list()
+  for (i in seq_along(levels(clusters))){
+    bootstrap_mean_list[[i]] <- bootstrap_cluster_means(x[,clusters == levels(clusters)[i]], n_bootstrap)
+  }
+  names(bootstrap_mean_list) <- levels(clusters)
+  cluster_pairs <- as.list(as.data.frame(combn(levels(clusters)[levels(clusters) != ref_cluster], 2)))
+  #reorder cluster pairs so that largest group is reference (unless it is the normal reference)
+  cluster_tabs <- table(clusters)
+  for (i in seq_along(cluster_pairs)){
+    cluster_pairs[[i]] <- cluster_pairs[[i]][order(cluster_tabs[cluster_pairs[[i]]], decreasing = F)]
+  }
+  sfs <- seq(sf_start, sf_end, sf_step)
+  mse_array <- array(0,dim = rep(length(sfs), length(levels(clusters)) - 1), dimnames = lapply(1:(length(levels(clusters)) - 1), function(x){sfs}))
+  #first, compute mses for each cluster against the reference (distance from rounded values)
+  non_ref_clusters <- levels(clusters)[levels(clusters) != ref_cluster]
+  x_ref_out_list <- list()
+  #need to check why this doesn't produce same results as before - fixed?
+  for (i in seq_along(non_ref_clusters)){
+    #also returns bootstrap values to re-use later for pairwise comparisons
+    x_ref_out_list[[i]] <- get_mse_x_ref(x, clusters, bootstrap_mean_list, non_ref_clusters[[i]], ref_cluster, is_ref_female, n_bootstrap, sfs, weight_by_precision, weight_by_cluster)
+    mse_idx <- vector(mode = "list", length = length(non_ref_clusters))
+    for (j in seq_along(mse_idx)){
+      mse_idx[[j]] <- 1:length(sfs)
+    }
+    #hacky: https://stackoverflow.com/questions/71470426/r-is-there-a-way-to-index-an-array-without-knowing-the-number-of-its-dimensions
+    for (j in seq_along(sfs)){
+      mse_idx[[i]] <- j
+      mse_array <- do.call(`[<-`, c(list(mse_array), mse_idx, list(do.call(`[`, c(list(mse_array), mse_idx)) + x_ref_out_list[[i]]$mse[j])))
+    }
+  }
+  names(x_ref_out_list) <- non_ref_clusters
+  array_dimnames <- setNames(1:length(non_ref_clusters), non_ref_clusters)
+  #then, add mses based on distance of pairwise differences (after scaling) from their rounded values (testing alignment of copy number differences between clusters to integers)
+  for (i in seq_along(cluster_pairs)){
+    mse_mat <- matrix(nrow = length(sfs), ncol = length(sfs))
+    x_idx <- cluster_pairs[[i]][1]
+    y_idx <- cluster_pairs[[i]][2]
+
+    x_mean <- rowMeans(x[,clusters == x_idx])
+    y_mean <- rowMeans(x[,clusters == y_idx])
+
+    x_y_bootstrap <- (bootstrap_mean_list[[x_idx]] / bootstrap_mean_list[[ref_cluster]]) / (bootstrap_mean_list[[y_idx]] / bootstrap_mean_list[[ref_cluster]])
+    x_y_bootstrap[is.na(x_y_bootstrap)] <- Inf
+
+    x_ref_var <- rowVars(x_ref_bootstrap)
+    y_ref_var <- rowVars(y_ref_bootstrap)
+
+    x_ref_ratio <- 2 * (x_mean / ref_mean)
+    y_ref_ratio <- 2 * (y_mean / ref_mean)
+    if (!is_ref_female){
+      x_ref_ratio[grepl("chrX|chrY", names(x_ref_ratio))] <- 0.5 * x_ref_ratio[grepl("chrX|chrY", names(x_ref_ratio))]
+      y_ref_ratio[grepl("chrX|chrY", names(y_ref_ratio))] <- 0.5 * y_ref_ratio[grepl("chrX|chrY", names(y_ref_ratio))]
+    }
+    x_y_ratio <- x_ref_ratio / y_ref_ratio
+    x_y_var <- rowVars(x_y_bootstrap)
+    is_excluded_x_y <- x_y_var == 0 | rowSums(is.infinite(x_y_bootstrap) > 0) | y_mean < 2
+
+    x_y_precision_weights2 <- 1 / rowVars(log(x_y_bootstrap[!is_excluded_x_y,] + 0.01))
+    x_y_precision_weights2 <- length(x_y_precision_weights2) * x_y_precision_weights2 / sum(x_y_precision_weights2)
+
+    if (weight_by_cluster){
+      x_y_clusters <- Ckmeans.1d.dp::Ckmeans.1d.dp(log(x_y_ratio[!is_excluded_x_y] + 0.01), y = x_y_precision_weights2)
+      x_y_cluster_weights <- (1 / table(x_y_clusters$cluster))[as.character(x_y_clusters$cluster)]
+    } else{
+      x_y_cluster_weights <- 1
+    }
+
+    use_array_dims <- c(array_dimnames[x_idx], array_dimnames[y_idx])
+    mse_idx <- vector(mode = "list", length = length(non_ref_clusters))
+    for (j in seq_along(mse_idx)){
+      mse_idx[[j]] <- 1:length(sfs)
+    }
+    for (j in seq_along(sfs)){
+      mse_idx[[use_array_dims[2]]] <- j
+      mse_difs <- get_mse_difs(x_ref_ratio[!is_excluded_x_y], sfs[j] * y_ref_ratio[!is_excluded_x_y], sfs, x_y_cluster_weights, x_ref_var[!is_excluded_x_y], (y_ref_var * sfs[j] ** 2)[!is_excluded_x_y])
+      #need to rotate data?
+      #mse_array <- do.call(`[<-`, c(list(mse_array), mse_idx, list(do.call(`[`, c(list(mse_array), mse_idx)) + mse_difs)))
+      #very slow because of copying of data, nesting of data, and number of updates (n_cluster_pairs * n_sf ** 2 - before was just n_clusters * n_sf)
+      for (k in seq_along(mse_difs)){
+        mse_idx[[use_array_dims[1]]] <- k
+        mse_array <- do.call(`[<-`, c(list(mse_array), mse_idx, list(do.call(`[`, c(list(mse_array), mse_idx)) + mse_difs[k])))
+      }
+    }
+  }
+  mse_melted <- reshape2::melt(mse_array)
+  colnames(mse_melted) <- c(paste0("cluster_", non_ref_clusters), "mse")
+  #mse_melted[which(mse_melted$mse == min(mse_melted$mse, na.rm = T)),]
+  list(scale_factors = as.matrix(mse_melted[which(mse_melted$mse == min(mse_melted$mse, na.rm = T)),paste0("cluster_", non_ref_clusters)])[1,],
+       mse_array = mse_array)
 }

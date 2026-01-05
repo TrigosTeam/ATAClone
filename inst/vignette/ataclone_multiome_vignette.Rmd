@@ -172,7 +172,7 @@ This is OPTIONAL. In some cases, it can remove cell types of interest. It is als
 #### Parameters
 
 ```{r}
-min_stable_frac <- 0
+min_stable_frac <- 0.125
 ```
 
 #### Code
@@ -197,7 +197,8 @@ We apply all of our filtering parameters here.
 is_retained <- colSums(stable_counts)[shared_barcodes] > min_stable_total & 
   colSums(intron_counts)[shared_barcodes] > min_intron_total &
   barcode_odds > min_barcode_odds & 
-  non_zero_residual > min_non_zero_residual
+  non_zero_residual > min_non_zero_residual &
+  stable_frac > min_stable_frac
 
 ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = is_retained)) + geom_point() +
   scale_x_log10() + scale_y_log10() + geom_vline(xintercept = min_stable_total) + 
@@ -246,7 +247,7 @@ After applying the variance-stabilising transformation and correcting for these 
 
 ```{r}
 nb_overdispersion <- 0.015
-discard_pcs <- c(1,2)
+discard_pcs <- c(1,3)
 npcs <- 25
 ```
 
@@ -303,7 +304,7 @@ knn_k <- 11
 #### Code
 
 ```{r}
-leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, npcs, discard_pcs, knn_k)
+leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, npcs, discard_pcs, knn_k, tolerance = 0.05)
 umap_embeddings <- get_umap(stable_counts_filtered_norm_pca$x, npcs, discard_pcs)
 cluster_outliers <- get_cluster_outliers(stable_counts_filtered_norm_pca$x, leiden_clusters, npcs, discard_pcs, knn_k, 0.2)
 
@@ -366,6 +367,12 @@ As copy number generally influences gene expression, we might expect clones to c
 gex_umap_embeddings <- get_umap(gex_counts_filtered_norm_pca$x, 25, discard_pcs = c(1,2))
 ggplot(data.frame(gex_umap_embeddings, cluster = leiden_clusters), aes(x = UMAP_1, y = UMAP_2, color = cluster)) + geom_point()
 
+gex_knn_graph <- scran::buildKNNGraph(t(gex_counts_filtered_norm_pca$x[,3:25]), k = knn_k)
+set.seed(100)
+gex_clusters <- igraph::cluster_leiden(gex_knn_graph, resolution = (knn_k - 1) / (gorder(gex_knn_graph) - 1))
+ggplot(data.frame(gex_umap_embeddings, cluster = factor(gex_clusters$membership)), aes(x = UMAP_1, y = UMAP_2, color = cluster)) + geom_point()
+scdlb_out <- scDblFinder::scDblFinder(gex_counts_filtered, gex_clusters$membership, dbr = 0.02 * ncol(gex_counts_filtered) / 1000)
+
 #load Seurat to use Azimuth for cell annotation
 library("Seurat")
 seurat_object <- Seurat::CreateSeuratObject(gex_counts_filtered)
@@ -385,7 +392,7 @@ Here we specify a total stable count threshold for each clone, above which dropl
 ```{r}
 #the minimum total stable count in a cell of cluster i to be considered a doublet/multiplet
 #make sure there is one entry for each cluster!
-doublet_thresholds <- c(10 ** 3.75, 10 ** 3.75, 10 ** 3.75, 10 ** 3.75, 10 ** 3.75)
+doublet_thresholds <- c(10 ** 3.7, 10 ** 3.7, 10 ** 3.7, 10 ** 3.7)
 ```
 
 #### Code
@@ -396,9 +403,10 @@ for (i in levels(leiden_clusters)){
   is_doublet[leiden_clusters == i] <- colSums(stable_counts_filtered[,leiden_clusters == i]) > doublet_thresholds[as.integer(i)]
   doublet_df <- data.frame(atac.peak.count = colSums(stable_counts_filtered[,leiden_clusters == i & !cluster_outliers]), 
                            rna.intron.count = colSums(intron_counts_filtered[,leiden_clusters == i & !cluster_outliers]),
-                           is.doublet = is_doublet[leiden_clusters == i & !cluster_outliers]
+                           is.doublet = is_doublet[leiden_clusters == i & !cluster_outliers],
+                           doublet.score = scdlb_out$scDblFinder.score[leiden_clusters == i & !cluster_outliers]
   )
-  plot(ggplot(doublet_df, aes(x = atac.peak.count, y = rna.intron.count, color = is.doublet)) + geom_point() + scale_x_log10() + scale_y_log10())
+  plot(ggplot(doublet_df, aes(x = atac.peak.count, y = rna.intron.count, color = doublet.score)) + geom_point() + scale_x_log10() + scale_y_log10() + geom_vline(xintercept = doublet_thresholds[as.integer(i)]) + scale_color_gradient(low = "blue", high = "yellow"))
 }
 ```
 
@@ -407,7 +415,8 @@ Given the correlation between total RNA and total DNA (as measured by ATAC-seq),
 
 #### Code
 ```{r}
-absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 3, cluster_outliers, is_doublet, T)
+cn_fit_out <- fit_cn_clusters(stable_counts_filtered, leiden_clusters, 4, F, cluster_outliers | is_doublet, 1000, 0.7, 2, 0.025, T, T)
+absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 4, cn_fit_out$scale_factors, cluster_outliers, is_doublet, F)
 for (i in seq_along(absolute_cn_list)){
   plot_absolute_cn(absolute_cn_list[[i]], names(absolute_cn_list)[i])
 }
