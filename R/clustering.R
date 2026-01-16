@@ -68,7 +68,7 @@ iterative_cluster_sim <- function(x, overdispersion, npcs, discard_pcs, k, start
     for (j in unique(leiden.clusters)){
       knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j, use_pcs]), k = k, directed = F, d = NA)
       knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,use_pcs_sim]), k = k, directed = F, d = NA)
-      leiden.resolution <- scan_resolution(knn.graph.sim, 0, k, 1, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
+      leiden.resolution <- scan_resolution(knn.graph.sim, 0, stop, 1, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
       leiden.clusters2[leiden.clusters == j] <- paste0(leiden.clusters[leiden.clusters == j], "_", reorder_clusters(cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership))
     }
     leiden.clusters <- leiden.clusters2

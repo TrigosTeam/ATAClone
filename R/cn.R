@@ -298,6 +298,21 @@ get_mse_difs <- function(x, y, sfs, bin_weights, x_var, y_var){
   mses
 }
 
+get_mse_difs <- function(x, y, sfs, bin_weights, bootstrap_vars){
+  mses <- numeric(length(sfs))
+  for (i in seq_along(sfs)){
+    sf <- sfs[i]
+    dif.rounded <- round(sf * x - y)
+    precision_weights <- 1 / bootstrap_vars[[i]]
+    #precision weights are causing higher scaling factors to be favoured - fixed?
+    mses[i] <- weighted.mean((sf * x - y - dif.rounded) ** 2, bin_weights * precision_weights)
+  }
+  #cn.estimates <- lapply(sfs, `*`, ratio)
+  #is.excluded <- sapply(cn.estimates, median) < 1.5
+  #mses[is.excluded] <- NA
+  mses
+}
+
 get_mse <- function(ratio, sfs1, sfs2, bin_weights){
   sfs <- sfs1 / sfs2
   mses <- numeric(length(sfs))
@@ -344,11 +359,15 @@ get_mse_x_ref <- function(x, clusters, bootstrap_mean_list, x_idx, ref_cluster, 
     x_clusters <- Ckmeans.1d.dp::Ckmeans.1d.dp(log(x_ref_ratio[!is_excluded_x] + 0.01), y = x_ref_precision_weights2)
     x_cluster_weights <- (1 / table(x_clusters$cluster))[as.character(x_clusters$cluster)]
   } else{
-    x_cluster_weights <- 1
+    x_clusters <- list()
+    x_clusters$cluster <- rep(1,length(x_ref_ratio[!is_excluded_x]))
+    x_cluster_weights <- rep(1,length(x_ref_ratio[!is_excluded_x]))
   }
 
   if (weight_by_precision){
     x_ref_weights <- x_cluster_weights * x_ref_precision_weights
+  } else {
+    x_ref_weights <- x_cluster_weights
   }
 
   x_mse <- get_mse(x_ref_ratio[!is_excluded_x], sfs, 1, x_ref_weights)
@@ -403,12 +422,10 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
 
     x_mean <- rowMeans(x[,clusters == x_idx])
     y_mean <- rowMeans(x[,clusters == y_idx])
+    ref_mean <- rowMeans(x[,clusters == ref_cluster])
 
     x_y_bootstrap <- (bootstrap_mean_list[[x_idx]] / bootstrap_mean_list[[ref_cluster]]) / (bootstrap_mean_list[[y_idx]] / bootstrap_mean_list[[ref_cluster]])
     x_y_bootstrap[is.na(x_y_bootstrap)] <- Inf
-
-    x_ref_var <- rowVars(x_ref_bootstrap)
-    y_ref_var <- rowVars(y_ref_bootstrap)
 
     x_ref_ratio <- 2 * (x_mean / ref_mean)
     y_ref_ratio <- 2 * (y_mean / ref_mean)
@@ -427,7 +444,7 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
       x_y_clusters <- Ckmeans.1d.dp::Ckmeans.1d.dp(log(x_y_ratio[!is_excluded_x_y] + 0.01), y = x_y_precision_weights2)
       x_y_cluster_weights <- (1 / table(x_y_clusters$cluster))[as.character(x_y_clusters$cluster)]
     } else{
-      x_y_cluster_weights <- 1
+      x_y_cluster_weights <- rep(1, length(x_y_ratio[!is_excluded_x_y]))
     }
 
     use_array_dims <- c(array_dimnames[x_idx], array_dimnames[y_idx])
@@ -437,7 +454,17 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
     }
     for (j in seq_along(sfs)){
       mse_idx[[use_array_dims[2]]] <- j
-      mse_difs <- get_mse_difs(x_ref_ratio[!is_excluded_x_y], sfs[j] * y_ref_ratio[!is_excluded_x_y], sfs, x_y_cluster_weights, x_ref_var[!is_excluded_x_y], (y_ref_var * sfs[j] ** 2)[!is_excluded_x_y])
+      bootstrap_vars <- list()
+      if (weight_by_precision){
+        for (k in seq_along(sfs)){
+          bootstrap_vars[[k]] <- rowVars(sfs[k] * x_ref_out_list[[x_idx]]$bootstrap_mat - sfs[j] * x_ref_out_list[[y_idx]]$bootstrap_mat)[!is_excluded_x_y]
+        }
+      } else{
+        for (k in seq_along(sfs)){
+          bootstrap_vars[[k]] <- rep(1, sum(!is_excluded_x_y))
+        }
+      }
+      mse_difs <- get_mse_difs(x_ref_ratio[!is_excluded_x_y], sfs[j] * y_ref_ratio[!is_excluded_x_y], sfs, x_y_cluster_weights, bootstrap_vars)
       #need to rotate data?
       #mse_array <- do.call(`[<-`, c(list(mse_array), mse_idx, list(do.call(`[`, c(list(mse_array), mse_idx)) + mse_difs)))
       #very slow because of copying of data, nesting of data, and number of updates (n_cluster_pairs * n_sf ** 2 - before was just n_clusters * n_sf)

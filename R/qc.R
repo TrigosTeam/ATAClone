@@ -47,7 +47,7 @@ fit_stable_frac_regression <- function(y, stable_counts, all_counts){
 fit_sim_mean_var <- function(x, nb_overdispersion){
   x_sim <- simulate_counts(x, nb_overdispersion)
   x_sim_norm <- normalise_counts(x_sim, overdispersion = nb_overdispersion)
-  x_sim_norm_cor <- correct_normalised_counts(x_sim_norm, discard_pcs)
+  x_sim_norm_cor <- correct_normalised_counts(x_sim_norm, 1)
   x_sim_norm_cor
 
   loess_df <- data.frame(sim.mean = rowMeans(x_sim_norm_cor), sim.var = rowVars(x_sim_norm_cor))

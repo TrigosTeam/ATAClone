@@ -172,7 +172,7 @@ This is OPTIONAL. In some cases, it can remove cell types of interest. It is als
 #### Parameters
 
 ```{r}
-min_stable_frac <- 0.125
+min_stable_frac <- 0.05
 ```
 
 #### Code
@@ -298,13 +298,13 @@ After deriving the clones, we verify that they are not explained by unwanted tec
 #### Parameters
 
 ```{r}
-knn_k <- 11
+knn_k <- 20
 ```
 
 #### Code
 
 ```{r}
-leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, npcs, discard_pcs, knn_k, tolerance = 0.05)
+leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, npcs, discard_pcs, knn_k, tolerance = 0.1)
 umap_embeddings <- get_umap(stable_counts_filtered_norm_pca$x, npcs, discard_pcs)
 cluster_outliers <- get_cluster_outliers(stable_counts_filtered_norm_pca$x, leiden_clusters, npcs, discard_pcs, knn_k, 0.2)
 
@@ -392,7 +392,7 @@ Here we specify a total stable count threshold for each clone, above which dropl
 ```{r}
 #the minimum total stable count in a cell of cluster i to be considered a doublet/multiplet
 #make sure there is one entry for each cluster!
-doublet_thresholds <- c(10 ** 3.7, 10 ** 3.7, 10 ** 3.7, 10 ** 3.85)
+doublet_thresholds <- c(10 ** 3.7, 10 ** 3.7, 10 ** 3.85, 10 ** 3.85, 10 ** 3.75)
 ```
 
 #### Code
@@ -415,7 +415,7 @@ Given the correlation between total RNA and total DNA (as measured by ATAC-seq),
 
 #### Code
 ```{r}
-cn_fit_out <- fit_cn_clusters(stable_counts_filtered, leiden_clusters, 4, F, cluster_outliers | is_doublet, 1000, 0.7, 2, 0.025, T, T)
+cn_fit_out <- ATAClone:::fit_cn_clusters(stable_counts_filtered, leiden_clusters, 4, F, cluster_outliers | is_doublet, 1000, 0.7, 2.25, 0.05, T, T)
 absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 4, cn_fit_out$scale_factors, cluster_outliers, is_doublet, F)
 for (i in seq_along(absolute_cn_list)){
   plot_absolute_cn(absolute_cn_list[[i]], names(absolute_cn_list)[i])
