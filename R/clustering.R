@@ -1,8 +1,27 @@
-#' @export
-normalise_counts <- function(x, overdispersion){
-  transformGamPoi::acosh_transform(x, overdispersion, F)
+find_lambda <- function(x, overdispersion, pseudo_count){
+  mu_mat <- do.call(cbind, lapply(1:ncol(x), function(x2){rowMeans(x)}))
+  sim_counts <- t(simulate_counts(mu_mat, overdispersion))
+  #don't want to fit on bins with all zeros
+  sim_counts2 <- sim_counts[,colMeans(sim_counts) > 0] + pseudo_count
+  fit_box_cox <- MASS::boxcox(lm(sim_counts2~1))
+  lambda <- fit_box_cox$x[order(fit_box_cox$y, decreasing = T)][1]
+  lambda
 }
 
+#' @export
+normalise_counts <- function(x, overdispersion, pseudo_count = 0, lambda = NULL){
+  if (is.null(lambda)){
+    if (overdispersion == 0){
+      2 * sqrt(x + pseudo_count)
+    } else {
+      #equivalent to acosh transformation in transformGamPoi when pseudo_count = 0
+      2 * sqrt(1 / overdispersion - 0.5) * asinh(sqrt((x + pseudo_count) / (1 / overdispersion - 2 * pseudo_count)))
+    }
+  } else {
+    #power transformation
+    (x + pseudo_count) ** lambda
+  }
+}
 #' @export
 correct_normalised_counts <- function(x, discard_pcs){
   x.pca <- prcomp(t(x))
@@ -34,29 +53,103 @@ reorder_clusters <- function(clusters){
   as.integer(unname(new_cluster_ids[as.character(clusters)]), levels = 1:length(sorted_tabs))
 }
 
-scan_resolution <- function(knn.graph, start, stop, step, seed = NULL, n.iter = 20, tolerance = 0.01){
+scan_resolution2 <- function(knn.graph, start, stop, step, seed = NULL, n.iter = ceiling(500000 / gorder(knn.graph)), tolerance = 0.01){
+  print("Beginning binary search")
+  start_p <- 0
+  stop_p <- 1
   if (!is.null(seed)){
     set.seed(seed)
   }
-  for (i in seq(start, stop, step)){
+  leiden.resolution <- (start + stop) / 2
+  ps <- numeric(100)
+  resolutions <- numeric(100)
+  #count number of times "start" of binary search range is 0 - if we get stuck alternating between 0 and a non-zero value, we probably won't reach
+  #required tolerance level - so cancel search when we hit max_zeros and return largest "start" value seen so far
+  zero_count <- 0
+  max_zeros <- 5
+  for (i in 1:100){
+    #print(leiden.resolution)
+    leiden.clusters <- unlist(lapply(1:n.iter, function(j){ATAClone:::reorder_clusters(igraph::cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution / (igraph::gorder(knn.graph) - 1))$membership)}))
+    p <- (sum(leiden.clusters != 1)) / (igraph::gorder(knn.graph) * n.iter)
+    #print(p)
+    print(paste0("Tried resolution ", leiden.resolution, " (p=", round(p,4), ")"))
+    resolutions[i] <- leiden.resolution
+    ps[i] <- p
+    if (p > stop_p | p < start_p){
+      print("unstable!")
+      #plot(resolutions[1:i], ps[1:i])
+      abline(h = tolerance)
+      return(max(resolutions[1:i][ps[1:i] < tolerance]))
+    }
+    if (p > tolerance){
+      stop <- leiden.resolution
+      stop_p <- p
+      new.leiden.resolution <- (leiden.resolution + start) / 2
+      #new.leiden.resolution <- exp((log(leiden.resolution) + log(start)) / 2)
+    } else {
+      start <- leiden.resolution
+      start_p <- p
+      if (start_p == 0){
+        zero_count <- zero_count + 1
+        if (zero_count == max_zeros){
+          return(leiden.resolution)
+        }
+      } else {
+        zero_count <- 0
+      }
+      new.leiden.resolution <- (leiden.resolution + stop) / 2
+      #new.leiden.resolution <- exp((log(leiden.resolution) + log(stop)) / 2)
+    }
+    #if ((stop - start) < 1){
+    #  return(leiden.resolution)
+    #}
+    if (abs(tolerance - p) < (tolerance / 10)){
+      #plot(resolutions[1:i], ps[1:i])
+      abline(h = tolerance)
+      return(leiden.resolution)
+    } else{
+      leiden.resolution <- new.leiden.resolution
+    }
+  }
+  print("binary search did not finish")
+  leiden.resolution
+}
+
+scan_resolution <- function(knn.graph, start, stop, step, seed = NULL, n.iter = ceiling(500000 / gorder(knn.graph)), tolerance = 0.01){
+  if (!is.null(seed)){
+    set.seed(seed)
+  }
+  ps <- numeric(length(seq(start, stop, step)))
+  resolutions <- numeric(length(seq(start, stop, step)))
+  for (j in seq_along(seq(start, stop, step))){
+    i <- seq(start, stop, step)[j]
     leiden.resolution <- i / (igraph::gorder(knn.graph) - 1)
     #leiden.clusters <- cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership
     #if (sum(leiden.clusters == 2) > 0){
     #  return(i - step)
     #}
-    leiden.clusters <- unlist(lapply(1:n.iter, function(j){reorder_clusters(igraph::cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership)}))
+    leiden.clusters <- unlist(lapply(1:n.iter, function(j){ATAClone:::reorder_clusters(igraph::cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership)}))
+    p <- (sum(leiden.clusters != 1)) / (igraph::gorder(knn.graph) * n.iter)
+    ps[j] <- p
+    resolutions[j] <- i
+    #print(i)
+    #print(p)
     if (sum(leiden.clusters != 1) > igraph::gorder(knn.graph) * n.iter * tolerance){
+      plot(resolutions[1:j], ps[1:j])
+      abline(h = tolerance)
       return(i - step)
     }
   }
+  plot(resolutions[1:j], ps[1:j])
+  abline(h = tolerance)
   i
 }
 
 #' @export
-iterative_cluster_sim <- function(x, overdispersion, npcs, discard_pcs, k, start = 0, stop = 2 * k, step = 1, seed = 100, iter.limit = 2, rename.clusters = T, tolerance = 0.01){
+iterative_cluster_sim <- function(x, overdispersion, pseudo_count, lambda = NULL, npcs, discard_pcs, k, start = 0, stop = 2 * k, step = 1, seed = 100, iter.limit = 2, rename.clusters = T, tolerance = 0.01){
   set.seed(seed)
-  x.norm.pca <- get_pca(normalise_counts(x, overdispersion), npcs)
-  x.sim.norm.pca <- get_pca(normalise_counts(simulate_counts(x, overdispersion), overdispersion), npcs)
+  x.norm.pca <- get_pca(normalise_counts(x, overdispersion, pseudo_count, lambda), npcs)
+  x.sim.norm.pca <- get_pca(normalise_counts(simulate_counts(x, 0.015), overdispersion, pseudo_count, lambda), npcs)
   leiden.clusters <- rep("start", ncol(x))
   use_pcs <- 1:npcs
   use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
@@ -64,20 +157,23 @@ iterative_cluster_sim <- function(x, overdispersion, npcs, discard_pcs, k, start
   discard_pcs_sim <- ifelse(1 %in% discard_pcs, 1, NULL)
   use_pcs_sim <- use_pcs_sim[!use_pcs_sim %in% discard_pcs_sim][1:length(use_pcs)]
   for (i in 1:iter.limit){
+    print(paste0("Beginning clustering iteration ", i))
     leiden.clusters2 <- leiden.clusters
     for (j in unique(leiden.clusters)){
+      print(paste0("Finding simulated cluster ", i))
       knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j, use_pcs]), k = k, directed = F, d = NA)
       knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,use_pcs_sim]), k = k, directed = F, d = NA)
-      leiden.resolution <- scan_resolution(knn.graph.sim, 0, stop, 1, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
-      leiden.clusters2[leiden.clusters == j] <- paste0(leiden.clusters[leiden.clusters == j], "_", reorder_clusters(cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership))
+      leiden.resolution <- scan_resolution2(knn.graph.sim, start, stop, step, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
+      leiden.clusters2[leiden.clusters == j] <- paste0(leiden.clusters[leiden.clusters == j], "_", ATAClone:::reorder_clusters(cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership))
     }
     leiden.clusters <- leiden.clusters2
+    print(paste0("Found ", length(unique(leiden_clusters)), " clusters"))
     if (length(unique(leiden.clusters)) > 1 & i != iter.limit){
       x.list <- list()
       for (j in unique(leiden.clusters)){
         x.list[[j]] <- x[,leiden.clusters == j]
       }
-      x.sim.norm.pca <- get_pca(normalise_counts(do.call(cbind, lapply(x.list, simulate_counts, overdispersion))[rownames(x),colnames(x)], overdispersion), npcs)
+      x.sim.norm.pca <- get_pca(normalise_counts(do.call(cbind, lapply(x.list, simulate_counts, 0.015))[rownames(x),colnames(x)], overdispersion, pseudo_count, lambda), npcs)
     } else {
       break
     }

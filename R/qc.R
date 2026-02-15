@@ -19,6 +19,7 @@ get_expected_non_zeros <- function(x, overdispersion){
   nrow(x) - expected.zeros
 }
 
+#this is for fitting the same bin across cells
 get_glm <- function(y, x, y.offset){
   y.glm <- glm(y ~ log(x) + offset(log(y.offset)), family = "poisson")
   y.glm
@@ -52,4 +53,20 @@ fit_sim_mean_var <- function(x, nb_overdispersion){
 
   loess_df <- data.frame(sim.mean = rowMeans(x_sim_norm_cor), sim.var = rowVars(x_sim_norm_cor))
   loess(sim.var ~ sim.mean, loess_df, span = 0.2)
+}
+
+#this is for fitting across different bins in the same cell. Example inputs:
+#x <- log(rowMeans(stable_counts_ref)[rowMeans(stable_counts_ref) > 0])
+#y <- as.list(as.data.frame(as.matrix(stable_counts_filtered)[rowMeans(stable_counts_ref) > 0,]))
+#or
+#bin_fracs <- rowSums(stable_counts_filtered) / rowSums(all_counts_filtered)
+#x <- log(bin_fracs[bin_fracs > 0])
+#y <- as.list(as.data.frame(as.matrix(stable_counts_filtered)[bin_fracs > 0,]))
+get_pois_reg <- function(y, x){
+  glm(y ~ x, poisson(link = "log"))$coefficients
+}
+
+#' @export
+get_pois_regression_betas <- function(y, x){
+  do.call(rbind, lapply(y, get_pois_reg, x))[,2]
 }
