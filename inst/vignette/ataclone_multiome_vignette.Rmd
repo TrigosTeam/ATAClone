@@ -251,6 +251,9 @@ After applying the variance-stabilising transformation and correcting for these 
 
 ```{r}
 nb_overdispersion <- 0.01
+#the overdispersion parameter used to estimate lambda for a power function (usually set same as nb_overdispersion)
+#Setting higher results in decreasing mean-variance trend - useful when transposition efficiency bias confounds clone separation
+fit_nb_overdispersion <- 0.01
 pseudo_count <- 0.5
 lambda <- NULL
 discard_pcs <- c(1,3)
@@ -261,7 +264,7 @@ npcs <- 25
 
 ```{r}
 #find lambda to normalise using power transformation instead of vst
-lambda <- find_lambda(stable_counts_filtered, nb_overdispersion, pseudo_count)
+lambda <- find_lambda(stable_counts_filtered, fit_nb_overdispersion, pseudo_count)
 loess_mean_var <- fit_sim_mean_var(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda)
 
 stable_counts_filtered_norm <- normalise_counts(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda)
@@ -343,84 +346,52 @@ plot_copy_number(stable_counts_filtered, stable_counts_ref, leiden_clusters, sta
 
 ## Downstream Analysis
 
-### scRNA-seq normalisation
-In general, the same principles we applied to derive our clones are also applicable to analysing scRNA-seq data. In fact, many ATAClone functions will work with scRNA-seq data.
-
-Here, we identify total RNA and the fraction of RNA-seq reads mapping to introns as unwanted technical factors. The latter may correspond to variation in the efficiency of nuclear isolation - when the cytoplasm is incompletely removed, the proportion of cytoplasmic RNA is higher and the fraction of reads in introns is lower.
-
-#### Code
-
-```{r}
-gex_counts_filtered_norm <- normalise_counts(gex_counts_filtered, 0.1)
-gex_counts_filtered_norm_pca <- get_pca(gex_counts_filtered_norm, npcs)
-
-gex_total_cor <- cor(gex_counts_filtered_norm_pca$x, sqrt(colSums(gex_counts_filtered)))[,1]
-intron_frac_cor <- cor(gex_counts_filtered_norm_pca$x, colSums(intron_counts_filtered) / colSums(gex_counts_filtered))[,1]
-
-pca_df <- data.frame(pc = 1:npcs, gex_total_cor, intron_frac_cor)
-pca_df2 <- data.frame(gex_counts_filtered_norm_pca$x, sqrt_gex_total = sqrt(colSums(gex_counts_filtered)), intron_frac = colSums(intron_counts_filtered) / colSums(gex_counts_filtered))
-
-ggplot(pca_df, aes(x = pc, y = gex_total_cor, fill = abs(gex_total_cor))) + geom_col() + 
-  ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
-best_pc <- paste0("PC", order(abs(pca_df$gex_total_cor), decreasing = T)[1])
-ggplot(pca_df2, aes(x = sqrt_gex_total, y = get(best_pc))) + geom_point() + ylab(best_pc)
-
-ggplot(pca_df, aes(x = pc, y = intron_frac_cor, fill = abs(intron_frac_cor))) + geom_col() + 
-  ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
-best_pc2 <- paste0("PC", order(abs(pca_df$intron_frac_cor), decreasing = T)[1])
-ggplot(pca_df2, aes(x = intron_frac, y = get(best_pc2))) + geom_point() + ylab(best_pc2)
-```
-
-
-### Orthogonal scRNA-seq analysis
-As copy number generally influences gene expression, we might expect clones to cluster separately based on gene expression too. Using cell annotation methods, we can also verify that the tumour and non-tumour cells have the expected cell identities.
-
-#### Code
-
-```{r}
-gex_umap_embeddings <- get_umap(gex_counts_filtered_norm_pca$x, 25, discard_pcs = c(1,2))
-ggplot(data.frame(gex_umap_embeddings, cluster = leiden_clusters), aes(x = UMAP_1, y = UMAP_2, color = cluster)) + geom_point()
-
-gex_knn_graph <- scran::buildKNNGraph(t(gex_counts_filtered_norm_pca$x[,3:25]), k = knn_k)
-set.seed(100)
-gex_clusters <- igraph::cluster_leiden(gex_knn_graph, resolution = (knn_k - 1) / (igraph::gorder(gex_knn_graph) - 1))
-ggplot(data.frame(gex_umap_embeddings, cluster = factor(gex_clusters$membership)), aes(x = UMAP_1, y = UMAP_2, color = cluster)) + geom_point()
-scdlb_out <- scDblFinder::scDblFinder(gex_counts_filtered, gex_clusters$membership, dbr = 0.02 * ncol(gex_counts_filtered) / 1000)
-
-#load Seurat to use Azimuth for cell annotation
-library("Seurat")
-seurat_object <- Seurat::CreateSeuratObject(gex_counts_filtered)
-seurat_object <- Azimuth::RunAzimuth(seurat_object, reference = "kidneyref")
-
-ggplot(data.frame(gex_umap_embeddings, cell.type = seurat_object$predicted.annotation.l2), aes(x = UMAP_1, y = UMAP_2, color = cell.type)) + geom_point()
-```
-
-
 ### Doublet detection
-After accounting for "low probability" barcodes, it is clear that total RNA and total DNA (as measured by ATAC-seq) are positively correlated. One explanation for this is the occurrence of doublets/multiplets in droplet-based single-cell sequencing. An advantage of this approach over traditional doublet-calling methods is that it allows identification of "homotypic" doublets consisting of two cells of the same type. However, if an experiment contains genuine mixtures of cells of different ploidies, then these high-ploidy cells would also be removed.
+After accounting for "low probability" barcodes, it is clear that total RNA and total DNA (as measured by ATAC-seq) are positively correlated. One explanation for this is the occurrence of doublets/multiplets in droplet-based single-cell sequencing.
 
-Here we specify a total stable count threshold for each clone, above which droplets are considered to be doublets/multiplets.
+Here, we will use scDblFinder to help find doublets. As we have already performed extensive filtering, scDblFinder's doublet rate estimate is likely to be underestimated, increasing the doublet score threshold required for doublet classification. We will choose our own threshold here as the value which separates barcodes with high intronic RNA counts from barcodes with low intronic RNA counts. As the score is based in part on total ATAC stable counts, this can help reduce overfitting.
 
 #### Parameters
 
 ```{r}
-#the minimum total stable count in a cell of cluster i to be considered a doublet/multiplet
-#make sure there is one entry for each cluster!
-doublet_thresholds <- c(10 ** 3.75, 10 ** 3.75, 10 ** 3.85, 10 ** 3.85, 10 ** 3.85, 10 ** 3.85, 10 ** 3.75)
+min_scdbl_score <- 0.6
+#scDblFinder appears to be quite stochastic - set a seed
+use.seed <- 100
 ```
 
 #### Code
 
 ```{r}
+set.seed(use.seed)
+scdbl_out <- scDblFinder::scDblFinder(stable_counts_filtered, clusters = leiden_clusters, dims = npcs,
+                                     processing = scDblFinder_custom_function, dbr = 0.025 * ncol(stable_counts_filtered) / 1000, nrounds = 1)
+scdbl_df <- data.frame(atac.stable.count = colSums(stable_counts_filtered), 
+                       rna.intron.count = colSums(intron_counts_filtered),
+                       scdbl_score = scdbl_out$scDblFinder.score)
+ggplot(scdbl_df, aes(x = scdbl_score, y = rna.intron.count, color = atac.stable.count)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow", trans = "log10") + scale_y_log10() + geom_vline(xintercept = min_scdbl_score)
+ggplot(scdbl_df, aes(x = scdbl_score, y = atac.stable.count, color = rna.intron.count)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow", trans = "log10") + scale_y_log10() + geom_vline(xintercept = min_scdbl_score)
+```
+
+
+#### Code
+
+### Removing doublets
+Rather than use our thresholded calls directly, we will use them to find a second threshold on the total stable counts per barcode. This is done by considering the thresholded calls to be the ground truth, then finding a total stable counts threshold which maximises the F1 score. The advantage of this approach is that it allows identification of "homotypic" doublets consisting of two cells of the same type, and also reduces the influence of any undetected doublets on copy number/ploidy calls. However, if an experiment contains genuine mixtures of cells of different ploidies, then these high-ploidy cells would also be removed.
+
+#### Code
+
+```{r}
+doublet_thresholds <- get_doublet_thresholds(stable_counts_filtered, leiden_clusters, scdbl_out$scDblFinder.score > min_scdbl_score)
+scdblFinder_class <- scdbl_out$scDblFinder.score > min_scdbl_score
 is_doublet <- logical(length(leiden_clusters))
 for (i in levels(leiden_clusters)){
   is_doublet[leiden_clusters == i] <- colSums(stable_counts_filtered[,leiden_clusters == i]) > doublet_thresholds[as.integer(i)]
   doublet_df <- data.frame(atac.peak.count = colSums(stable_counts_filtered[,leiden_clusters == i & !cluster_outliers]), 
                            rna.intron.count = colSums(intron_counts_filtered[,leiden_clusters == i & !cluster_outliers]),
                            is.doublet = is_doublet[leiden_clusters == i & !cluster_outliers],
-                           doublet.score = scdlb_out$scDblFinder.score[leiden_clusters == i & !cluster_outliers]
+                           is.dbl = scdblFinder_class[leiden_clusters == i & !cluster_outliers]
   )
-  plot(ggplot(doublet_df, aes(x = atac.peak.count, y = rna.intron.count, color = doublet.score)) + geom_point() + scale_x_log10() + scale_y_log10() + geom_vline(xintercept = doublet_thresholds[as.integer(i)]) + scale_color_gradient(low = "blue", high = "yellow"))
+  plot(ggplot(doublet_df, aes(x = atac.peak.count, y = rna.intron.count, color = is.dbl)) + geom_point() + scale_x_log10() + scale_y_log10() + geom_vline(xintercept = doublet_thresholds[as.integer(i)]))
 }
 ```
 
@@ -433,13 +404,16 @@ Given the correlation between total RNA and total DNA (as measured by ATAC-seq),
 ref_cluster <- 5
 exclude_clusters <- c(7)
 y_lim <- c(0,6)
+sf_start <- 0.7
+sf_stop <- 2.4
+sf_step <- 0.05
 ```
 
 
 #### Code
 ```{r}
 is_excluded <- cluster_outliers | is_doublet | leiden_clusters %in% exclude_clusters
-cn_fit_out <- ATAClone:::fit_cn_clusters(stable_counts_filtered, leiden_clusters, 5, F, is_excluded, 1000, 0.7, 2.3, 0.1, T, T)
+cn_fit_out <- ATAClone:::fit_cn_clusters(stable_counts_filtered, leiden_clusters, 5, F, is_excluded, 1000, sf_start, sf_stop, sf_step, T, T)
 absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 5, cn_fit_out$scale_factors, is_excluded, F)
 #for (i in seq_along(absolute_cn_list)){
 #  plot_absolute_cn(absolute_cn_list[[i]], names(absolute_cn_list)[i])
