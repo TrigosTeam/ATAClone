@@ -45,9 +45,9 @@ fit_stable_frac_regression <- function(y, stable_counts, all_counts){
 }
 
 #' @export
-fit_sim_mean_var <- function(x, nb_overdispersion){
+fit_sim_mean_var <- function(x, nb_overdispersion, pseudo_count, lambda){
   x_sim <- simulate_counts(x, nb_overdispersion)
-  x_sim_norm <- normalise_counts(x_sim, overdispersion = nb_overdispersion)
+  x_sim_norm <- normalise_counts(x_sim, overdispersion = nb_overdispersion, pseudo_count, lambda)
   x_sim_norm_cor <- correct_normalised_counts(x_sim_norm, 1)
   x_sim_norm_cor
 

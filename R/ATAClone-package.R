@@ -11,4 +11,5 @@
 #' @import uwot
 #' @import reshape2
 #' @import ComplexHeatmap
+#' @import MASS
 NULL

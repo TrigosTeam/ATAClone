@@ -255,7 +255,7 @@ plot_copy_number <- function(x, external_ref, clusters, pca_obj, discard_pcs, is
 #' @export
 get_absolute_copy_number <- function(x, clusters, ref_cluster, scale_factors, is_excluded, is_ref_female){
   new_feature_names <- get_new_feature_names(rownames(x))
-  x <- x[!is_excluded,]
+  x <- x[,!is_excluded]
   clusters <- factor(clusters[!is_excluded])
   cn.list <- list()
   for (i in levels(clusters)[levels(clusters) != ref_cluster]){
@@ -275,6 +275,7 @@ get_absolute_copy_number <- function(x, clusters, ref_cluster, scale_factors, is
   cn.list[["all"]] <- cn
   cn.list
 }
+
 
 #' @export
 plot_absolute_cn <- function(x, cluster_name){
@@ -532,4 +533,41 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
   #mse_array <- mse_array + Reduce(`+`, array_list)
   list(scale_factors = setNames(as.numeric(colnames(mse_array))[arrayInd(which.min(mse_array), dim(mse_array))], paste0("cluster_", non_ref_clusters)),
        mse_array = mse_array)
+}
+
+#' @export
+scDblFinder_custom_function <- function(e, dims){
+  e_norm <- normalise_counts(e, nb_overdispersion, pseudo_count, lambda)
+  e_norm_pca <- get_pca(e_norm, dims)
+  #need to use discard_pcs from global environment - scDblFinder can't pass to the custom function and its includePCs argument does not work properly
+  e_norm_pca$x[,(1:dims)[!((1:dims) %in% discard_pcs)]]
+}
+
+#' @export
+get_doublet_thresholds <- function(x, clusters, is_doublet){
+  cluster_levels <- levels(clusters)
+  thresholds <- numeric(length(cluster_levels))
+  for (i in seq_along(cluster_levels)){
+    is_cluster <- clusters == cluster_levels[i]
+    x2 <- x[,is_cluster]
+    is_doublet2 <- is_doublet[is_cluster]
+    lib_sizes <- colSums(x2)
+    quantiles <- quantile(lib_sizes, c(0.1, 0.9))
+    try_thresholds <- seq(quantiles[1], quantiles[2], 100)
+    f1s <- numeric(length(try_thresholds))
+    for (j in seq_along(try_thresholds)){
+      threshold <- try_thresholds[j]
+      is_less <- lib_sizes < threshold
+      tn <- sum(is_less & !is_doublet2)
+      fn <- sum(is_less & is_doublet2)
+      tp <- sum(!is_less & is_doublet2)
+      fp <- sum(!is_less & !is_doublet2)
+      precision <- tp / (tp + fp)
+      recall <- tp / (tp + fn)
+      f1 <- 2 * (precision * recall) / (precision + recall)
+      f1s[j] <- f1
+    }
+    thresholds[i] <- try_thresholds[which.max(f1s)]
+  }
+  setNames(thresholds, cluster_levels)
 }

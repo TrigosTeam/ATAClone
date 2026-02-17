@@ -1,9 +1,11 @@
+#' @export
 find_lambda <- function(x, overdispersion, pseudo_count){
   mu_mat <- do.call(cbind, lapply(1:ncol(x), function(x2){rowMeans(x)}))
   sim_counts <- t(simulate_counts(mu_mat, overdispersion))
   #don't want to fit on bins with all zeros
   sim_counts2 <- sim_counts[,colMeans(sim_counts) > 0] + pseudo_count
-  fit_box_cox <- MASS::boxcox(lm(sim_counts2~1))
+  lm_out <- lm(sim_counts2~1, y = T)
+  fit_box_cox <- boxcox(lm_out, plotit = F)
   lambda <- fit_box_cox$x[order(fit_box_cox$y, decreasing = T)][1]
   lambda
 }
@@ -78,7 +80,7 @@ scan_resolution2 <- function(knn.graph, start, stop, step, seed = NULL, n.iter =
     if (p > stop_p | p < start_p){
       print("unstable!")
       #plot(resolutions[1:i], ps[1:i])
-      abline(h = tolerance)
+      #abline(h = tolerance)
       return(max(resolutions[1:i][ps[1:i] < tolerance]))
     }
     if (p > tolerance){
@@ -105,7 +107,7 @@ scan_resolution2 <- function(knn.graph, start, stop, step, seed = NULL, n.iter =
     #}
     if (abs(tolerance - p) < (tolerance / 10)){
       #plot(resolutions[1:i], ps[1:i])
-      abline(h = tolerance)
+      #abline(h = tolerance)
       return(leiden.resolution)
     } else{
       leiden.resolution <- new.leiden.resolution
@@ -135,13 +137,13 @@ scan_resolution <- function(knn.graph, start, stop, step, seed = NULL, n.iter = 
     #print(i)
     #print(p)
     if (sum(leiden.clusters != 1) > igraph::gorder(knn.graph) * n.iter * tolerance){
-      plot(resolutions[1:j], ps[1:j])
-      abline(h = tolerance)
+      #plot(resolutions[1:j], ps[1:j])
+      #abline(h = tolerance)
       return(i - step)
     }
   }
-  plot(resolutions[1:j], ps[1:j])
-  abline(h = tolerance)
+  #plot(resolutions[1:j], ps[1:j])
+  #abline(h = tolerance)
   i
 }
 
@@ -160,14 +162,14 @@ iterative_cluster_sim <- function(x, overdispersion, pseudo_count, lambda = NULL
     print(paste0("Beginning clustering iteration ", i))
     leiden.clusters2 <- leiden.clusters
     for (j in unique(leiden.clusters)){
-      print(paste0("Finding simulated cluster ", i))
+      print(paste0("Finding resolution for simulated cluster ", j))
       knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j, use_pcs]), k = k, directed = F, d = NA)
       knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,use_pcs_sim]), k = k, directed = F, d = NA)
       leiden.resolution <- scan_resolution2(knn.graph.sim, start, stop, step, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
       leiden.clusters2[leiden.clusters == j] <- paste0(leiden.clusters[leiden.clusters == j], "_", ATAClone:::reorder_clusters(cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership))
     }
     leiden.clusters <- leiden.clusters2
-    print(paste0("Found ", length(unique(leiden_clusters)), " clusters"))
+    print(paste0("Found ", length(unique(leiden.clusters)), " clusters"))
     if (length(unique(leiden.clusters)) > 1 & i != iter.limit){
       x.list <- list()
       for (j in unique(leiden.clusters)){

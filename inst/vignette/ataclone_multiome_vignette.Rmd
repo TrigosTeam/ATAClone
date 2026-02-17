@@ -70,6 +70,7 @@ ref_all_path <- paste0(ref_path, "/ATAC/stable")
 
 #load normal reference ATAC-related matrices
 stable_counts_ref <- read_matrix(ref_stable_path)
+stable_counts_ref <- stable_counts_ref[,colSums(stable_counts_ref) > 1000]
 all_counts_ref <- read_matrix(ref_all_path)
 ```
 
@@ -180,8 +181,8 @@ min_stable_frac <- 0.05
 ```{r}
 qc_df$type <- rep("retain", length(shared_barcodes))
 qc_df$type[qc_df$rna_intron_total < min_intron_total] <- "empty"
-qc_df$type[qc_df$barcode_odds < min_barcode_odds] <- "low_prob"
 qc_df$type[non_zero_residual < min_non_zero_residual] <- "debris"
+qc_df$type[qc_df$barcode_odds < min_barcode_odds] <- "low_prob"
 
 ggplot(qc_df, aes(x = stable_frac, y = atac_stable_total, color = type)) + geom_point() + scale_y_log10() + geom_vline(xintercept = min_stable_frac)
 ggplot(qc_df, aes(x = stable_frac, y = atac_all_total, color = type)) + geom_point() + 
@@ -201,6 +202,9 @@ is_retained <- colSums(stable_counts)[shared_barcodes] > min_stable_total &
   stable_frac > min_stable_frac
 
 ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = is_retained)) + geom_point() +
+  scale_x_log10() + scale_y_log10() + geom_vline(xintercept = min_stable_total) + 
+  geom_hline(yintercept = min_intron_total)
+ggplot(qc_df, aes(x = atac_stable_total, y = rna_intron_total, color = type)) + geom_point() +
   scale_x_log10() + scale_y_log10() + geom_vline(xintercept = min_stable_total) + 
   geom_hline(yintercept = min_intron_total)
 
@@ -247,6 +251,8 @@ After applying the variance-stabilising transformation and correcting for these 
 
 ```{r}
 nb_overdispersion <- 0.01
+pseudo_count <- 0.5
+lambda <- NULL
 discard_pcs <- c(1,3)
 npcs <- 25
 ```
@@ -254,9 +260,11 @@ npcs <- 25
 #### Code
 
 ```{r}
-loess_mean_var <- fit_sim_mean_var(stable_counts_filtered, nb_overdispersion)
+#find lambda to normalise using power transformation instead of vst
+lambda <- find_lambda(stable_counts_filtered, nb_overdispersion, pseudo_count)
+loess_mean_var <- fit_sim_mean_var(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda)
 
-stable_counts_filtered_norm <- normalise_counts(stable_counts_filtered, nb_overdispersion)
+stable_counts_filtered_norm <- normalise_counts(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda)
 stable_counts_filtered_norm_cor <- correct_normalised_counts(stable_counts_filtered_norm, discard_pcs)
 
 norm_df <- data.frame(mean = rowMeans(stable_counts_filtered_norm_cor), var = rowVars(stable_counts_filtered_norm_cor))
@@ -271,13 +279,18 @@ Because our normalisation method does not scale out "library size", PC1 invariab
 #### Code
 
 ```{r}
+#do a per-cell Poisson regression over its bins against each bin's stable fraction (or its expected counts) to find residual dependence on transposition efficiency
+x <- log(rowMeans(stable_counts_ref)[rowMeans(stable_counts_ref) > 0])
+y <- as.list(as.data.frame(as.matrix(stable_counts_filtered)[rowMeans(stable_counts_ref) > 0,]))
+betas <- get_pois_regression_betas(y, x)
+
 stable_counts_filtered_norm_pca <- get_pca(stable_counts_filtered_norm, npcs)
 
 stable_total_cor <- cor(stable_counts_filtered_norm_pca$x, sqrt(atac_stable_total_filtered))[,1]
-stable_frac_cor <- cor(stable_counts_filtered_norm_pca$x, stable_frac_filtered)[,1]
+stable_frac_cor <- cor(stable_counts_filtered_norm_pca$x, betas)[,1]
 
 pca_df <- data.frame(pc = 1:npcs, stable_total_cor, stable_frac_cor)
-pca_df2 <- data.frame(stable_counts_filtered_norm_pca$x, sqrt_stable_total = sqrt(atac_stable_total_filtered), stable_frac = stable_frac_filtered)
+pca_df2 <- data.frame(stable_counts_filtered_norm_pca$x, sqrt_stable_total = sqrt(atac_stable_total_filtered), beta = betas)
 
 ggplot(pca_df, aes(x = pc, y = stable_total_cor, fill = abs(stable_total_cor))) + geom_col() + 
   ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
@@ -287,7 +300,7 @@ ggplot(pca_df2, aes(x = sqrt_stable_total, y = get(best_pc))) + geom_point() + y
 ggplot(pca_df, aes(x = pc, y = stable_frac_cor, fill = abs(stable_frac_cor))) + geom_col() + 
   ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
 best_pc2 <- paste0("PC", order(abs(pca_df$stable_frac_cor), decreasing = T)[1])
-ggplot(pca_df2, aes(x = stable_frac, y = get(best_pc2))) + geom_point() + ylab(best_pc2)
+ggplot(pca_df2, aes(x = beta, y = get(best_pc2))) + geom_point() + ylab(best_pc2)
 ```
 
 ### Graph-based clustering
@@ -304,14 +317,15 @@ knn_k <- 20
 #### Code
 
 ```{r}
-leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, npcs, discard_pcs, knn_k, tolerance = 0.05, start = 0)
+leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda, npcs, discard_pcs, knn_k, tolerance = 0.05, start = 0)
 umap_embeddings <- get_umap(stable_counts_filtered_norm_pca$x, npcs, discard_pcs)
 cluster_outliers <- get_cluster_outliers(stable_counts_filtered_norm_pca$x, leiden_clusters, npcs, discard_pcs, knn_k, 0.2)
 
-cluster_df <- data.frame(umap_embeddings, cluster = leiden_clusters, stable_total = atac_stable_total_filtered, stable_frac = stable_frac_filtered, is_outlier = cluster_outliers)
+cluster_df <- data.frame(umap_embeddings, cluster = leiden_clusters, stable_total = atac_stable_total_filtered, stable_frac = stable_frac_filtered, is_outlier = cluster_outliers, beta = betas)
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = cluster)) + geom_point()
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = stable_total)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow", trans = "log10")
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = stable_frac)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow")
+ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = beta)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow")
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = is_outlier)) + geom_point()
 ```
 
@@ -369,7 +383,7 @@ ggplot(data.frame(gex_umap_embeddings, cluster = leiden_clusters), aes(x = UMAP_
 
 gex_knn_graph <- scran::buildKNNGraph(t(gex_counts_filtered_norm_pca$x[,3:25]), k = knn_k)
 set.seed(100)
-gex_clusters <- igraph::cluster_leiden(gex_knn_graph, resolution = (knn_k - 1) / (gorder(gex_knn_graph) - 1))
+gex_clusters <- igraph::cluster_leiden(gex_knn_graph, resolution = (knn_k - 1) / (igraph::gorder(gex_knn_graph) - 1))
 ggplot(data.frame(gex_umap_embeddings, cluster = factor(gex_clusters$membership)), aes(x = UMAP_1, y = UMAP_2, color = cluster)) + geom_point()
 scdlb_out <- scDblFinder::scDblFinder(gex_counts_filtered, gex_clusters$membership, dbr = 0.02 * ncol(gex_counts_filtered) / 1000)
 
@@ -392,7 +406,7 @@ Here we specify a total stable count threshold for each clone, above which dropl
 ```{r}
 #the minimum total stable count in a cell of cluster i to be considered a doublet/multiplet
 #make sure there is one entry for each cluster!
-doublet_thresholds <- c(10 ** 3.7, 10 ** 3.7, 10 ** 3.85, 10 ** 3.85, 10 ** 3.7, 10 ** 3.85)
+doublet_thresholds <- c(10 ** 3.75, 10 ** 3.75, 10 ** 3.85, 10 ** 3.85, 10 ** 3.85, 10 ** 3.85, 10 ** 3.75)
 ```
 
 #### Code
@@ -413,13 +427,24 @@ for (i in levels(leiden_clusters)){
 ### Absolute copy number estimation
 Given the correlation between total RNA and total DNA (as measured by ATAC-seq), we might also assume that we can estimate copy number absolutely by using the non-tumour cells from the same experiment as our normal reference. Estimates may be confounded if the normal reference cells are polyploid. However, this is generally thought to be rare.
 
+#### Parameters
+
+```{r}
+ref_cluster <- 5
+exclude_clusters <- c(7)
+y_lim <- c(0,6)
+```
+
+
 #### Code
 ```{r}
-cn_fit_out <- ATAClone:::fit_cn_clusters(stable_counts_filtered, leiden_clusters, 3, F, cluster_outliers | is_doublet, 1000, 0.7, 2.3, 0.1, T, T)
-absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 3, cn_fit_out$scale_factors, cluster_outliers, is_doublet, F)
-for (i in seq_along(absolute_cn_list)){
-  plot_absolute_cn(absolute_cn_list[[i]], names(absolute_cn_list)[i])
-}
+is_excluded <- cluster_outliers | is_doublet | leiden_clusters %in% exclude_clusters
+cn_fit_out <- ATAClone:::fit_cn_clusters(stable_counts_filtered, leiden_clusters, 5, F, is_excluded, 1000, 0.7, 2.3, 0.1, T, T)
+absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 5, cn_fit_out$scale_factors, is_excluded, F)
+#for (i in seq_along(absolute_cn_list)){
+#  plot_absolute_cn(absolute_cn_list[[i]], names(absolute_cn_list)[i])
+#}
+plot_absolute_cn2(absolute_cn_list, y_lim = y_lim, exclude_clusters = c("all",exclude_clusters))
 ```
 
 ## Session Information
