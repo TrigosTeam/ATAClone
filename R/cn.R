@@ -270,6 +270,7 @@ get_absolute_copy_number <- function(x, clusters, ref_cluster, scale_factors, is
   }
   cn <- colMeans(scale_factors[paste0("cluster_", clusters[clusters != ref_cluster])] * t(x[new_feature_names, clusters != ref_cluster])) /
     rowMeans(x[new_feature_names, clusters == ref_cluster])
+  chr <- gsub("chr", "", sapply(strsplit(new_feature_names, "\\."), `[`, 1))
   chr <- factor(chr, unique(chr))
   cn <- ifelse(grepl("X|Y", chr) & !is_ref_female, 1, 2) * cn
   cn.list[["all"]] <- cn
@@ -302,7 +303,7 @@ plot_absolute_cn2 <- function(absolute_cn_list, max_dif = 1.5, y_lim = c(0,8), e
   chr <- factor(chr, unique(chr))
   test_plt$chr <- chr
   plot(ggplot(test_plt, aes(x = idx, y = cn, color = cn_resid)) + geom_point() + facet_grid(clone ~ chr, space = "free", scales = "free") + theme(panel.spacing.x = unit(0, "lines"), panel.grid.major.x = element_blank(), panel.grid.minor.x = element_blank(),panel.background = element_rect(color = "grey92", fill = "white"), panel.grid.major.y = element_line(color = "grey92"), panel.grid.minor.y = element_line(color = "grey92"), strip.background=element_rect(color = "white"), axis.title.x=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank(), legend.position = "none") + scale_x_continuous(expand = expansion(add = 2)) +
-         scale_color_gradient2(low = "blue", mid =  "grey", high = "red", midpoint = 0) + ylim(y_lim))
+         scale_color_gradient2(low = "blue", mid =  "grey", high = "red", midpoint = 0, limits = c(-max_dif, max_dif)) + ylim(y_lim))
 }
 
 get_mse_difs <- function(x, y, sfs, bin_weights, bootstrap_vars){
@@ -358,6 +359,10 @@ get_mse_x_ref <- function(x, clusters, bootstrap_mean_list, x_idx, ref_cluster, 
   }
 
   x_ref_precision_weights <- 1 / x_ref_var[!is_excluded_x]
+  #sex chromosomes in males have higher precision weights due to lower scaling factor than autosomes - let's undo for computing mse
+  if (!is_ref_female){
+    x_ref_precision_weights[grepl("chrX|chrY", names(x_ref_precision_weights))] <- 0.5 * x_ref_precision_weights[grepl("chrX|chrY", names(x_ref_precision_weights))]
+  }
   x_ref_precision_weights <- length(x_ref_precision_weights) * x_ref_precision_weights / sum(x_ref_precision_weights)
   x_ref_precision_weights2 <- 1 / rowVars(log(x_ref_bootstrap[!is_excluded_x,] + 0.01))
   x_ref_precision_weights2 <- length(x_ref_precision_weights2) * x_ref_precision_weights2 / sum(x_ref_precision_weights2)
@@ -394,16 +399,12 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
     bootstrap_mean_list[[i]] <- bootstrap_cluster_means(x[,clusters == levels(clusters)[i]], n_bootstrap)
   }
   names(bootstrap_mean_list) <- levels(clusters)
-  cluster_pairs <- as.list(as.data.frame(combn(levels(clusters)[levels(clusters) != ref_cluster], 2)))
-  #reorder cluster pairs so that largest group is reference (unless it is the normal reference)
-  cluster_tabs <- table(clusters)
-  for (i in seq_along(cluster_pairs)){
-    cluster_pairs[[i]] <- cluster_pairs[[i]][order(cluster_tabs[cluster_pairs[[i]]], decreasing = F)]
-  }
   sfs <- seq(sf_start, sf_end, sf_step)
   mse_array <- array(0,dim = rep(length(sfs), length(levels(clusters)) - 1), dimnames = lapply(1:(length(levels(clusters)) - 1), function(x){sfs}))
   #first, compute mses for each cluster against the reference (distance from rounded values)
   non_ref_clusters <- levels(clusters)[levels(clusters) != ref_cluster]
+  ref_cluster <- levels(clusters)[levels(clusters) == ref_cluster]
+  cluster_tabs <- table(clusters)
   if (weighting_strategy == "min_size"){
     cluster_weights <- cluster_tabs
   } else{
@@ -440,7 +441,6 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
   names(x_ref_out_list) <- non_ref_clusters
   array_dimnames <- setNames(1:length(non_ref_clusters), non_ref_clusters)
   #then, add mses based on distance of pairwise differences (after scaling) from their rounded values (testing alignment of copy number differences between clusters to integers)
-  print(paste0("Fitting ", length(cluster_pairs), " cluster pairs"))
   #to improve time efficiency, try making separate arrays for each cluster_pair (of the same dimensions), so that only the assignment operator needs to be used
   #(might reduce copying of data), then add them together at the end
   #more memory-efficient to make a new array for every iteration then add iteratively
@@ -449,6 +449,12 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
   #  array_list[[i]] <- array(,dim = rep(length(sfs), length(levels(clusters)) - 1), dimnames = lapply(1:(length(levels(clusters)) - 1), function(x){sfs}))
   #}
   if (length(non_ref_clusters) > 1 & fit_clusters_pairwise){
+    cluster_pairs <- as.list(as.data.frame(combn(levels(clusters)[levels(clusters) != ref_cluster], 2)))
+    #reorder cluster pairs so that largest group is reference (unless it is the normal reference)
+    for (i in seq_along(cluster_pairs)){
+      cluster_pairs[[i]] <- cluster_pairs[[i]][order(cluster_tabs[cluster_pairs[[i]]], decreasing = F)]
+    }
+    print(paste0("Fitting ", length(cluster_pairs), " cluster pairs"))
     if (weighting_strategy == "min_size"){
       #first element in each pair is always the smaller cluster
       cluster_weights <- cluster_tabs[sapply(cluster_pairs, `[`, 1)]
@@ -531,7 +537,7 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
   #colnames(mse_melted) <- c(paste0("cluster_", non_ref_clusters), "mse")
   #mse_melted[which(mse_melted$mse == min(mse_melted$mse, na.rm = T)),]
   #mse_array <- mse_array + Reduce(`+`, array_list)
-  list(scale_factors = setNames(as.numeric(colnames(mse_array))[arrayInd(which.min(mse_array), dim(mse_array))], paste0("cluster_", non_ref_clusters)),
+  list(scale_factors = setNames(as.numeric(rownames(mse_array))[arrayInd(which.min(mse_array), dim(mse_array))], paste0("cluster_", non_ref_clusters)),
        mse_array = mse_array)
 }
 
@@ -551,6 +557,14 @@ get_doublet_thresholds <- function(x, clusters, is_doublet){
     is_cluster <- clusters == cluster_levels[i]
     x2 <- x[,is_cluster]
     is_doublet2 <- is_doublet[is_cluster]
+    if (sum(is_doublet2) == sum(is_cluster)){
+      thresholds[i] <- 0
+      next
+    }
+    if (sum(is_doublet2) == 0){
+      thresholds[i] <- Inf
+      next
+    }
     lib_sizes <- colSums(x2)
     quantiles <- quantile(lib_sizes, c(0.1, 0.9))
     try_thresholds <- seq(quantiles[1], quantiles[2], 100)
