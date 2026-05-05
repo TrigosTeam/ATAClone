@@ -241,21 +241,58 @@ plot_copy_number <- function(x, external_ref, clusters, pca_obj, discard_pcs, is
 
   color_fun <- circlize::colorRamp2(breaks = c(0,2,4), colors = c("blue", "white", "red"))
 
-  use.clusters <- 1:length(levels(clusters))
-  cluster.cn <- list()
-  for (i in seq_along(use.clusters)){
-    cluster.cn[[i]] <- joint_cn_estimates[,clusters == use.clusters[i]][,1]
+  #overwrite ComplexHeatmap::cluster_between_groups to allow different distances and linkages
+  cluster_between_groups <- function(mat, factor, dist.method, linkage)
+  {
+    if (!is.factor(factor)) {
+      factor = factor(factor, levels = unique(factor))
+    }
+    dend_list = list()
+    order_list = list()
+    for (le in unique(levels(factor))) {
+      m = mat[, factor == le, drop = FALSE]
+      if (ncol(m) == 1) {
+        order_list[[le]] = which(factor == le)
+        dend_list[[le]] = structure(which(factor == le),
+                                    class = "dendrogram", leaf = TRUE, height = 0,
+                                    label = 1, members = 1)
+      }
+      else if (ncol(m) > 1) {
+        hc1 = hclust(dist(1:ncol(m)))
+        dend_list[[le]] = reorder(as.dendrogram(hc1), wts = 1:ncol(m),
+                                  agglo.FUN = mean)
+        order_list[[le]] = which(factor == le)[order.dendrogram(dend_list[[le]])]
+        dend_list[[le]] <- ComplexHeatmap:::`order.dendrogram<-`(dend_list[[le]], order_list[[le]])
+      }
+      attr(dend_list[[le]], ".class_label") = le
+    }
+    parent = as.dendrogram(hclust(dist(t(sapply(order_list, function(x) rowMeans(mat[,
+                                                                                     x, drop = FALSE]))), dist.method), linkage))
+    dend_list = lapply(dend_list, function(dend) dendrapply(dend,
+                                                            function(node) {
+                                                              attr(node, "height") = 0
+                                                              node
+                                                            }))
+    dend = ComplexHeatmap::merge_dendrogram(parent, dend_list)
+    dend <- ComplexHeatmap:::`order.dendrogram<-`(dend, unlist(order_list[order.dendrogram(parent)]))
+    return(dend)
   }
-  cluster.cn <- do.call(cbind, cluster.cn)
-  test_hclust <- get_new_hclust(joint_cn_estimates, new_cell_order, clusters)
 
-  ComplexHeatmap::Heatmap(t(as.matrix(single_cn_estimates[new_feature_names,][,new_cell_order])), cluster_rows = test_hclust, cluster_columns = F, column_split = feature_factor, row_labels = rep('', ncol(joint_cn_estimates)), column_labels = rep('', nrow(joint_cn_estimates)), border = T, col = color_fun, top_annotation = chr_arm, row_split = length(levels(clusters)), row_title = hclust(dist(t(cluster.cn), method = "manhattan"), "single")$order, heatmap_legend_param = list(title = "copy_number"))
+  #https://github.com/jokergoo/ComplexHeatmap/issues/694
+  dend <- cluster_between_groups(as.matrix(single_cn_estimates[new_feature_names,][,new_cell_order]), clusters[new_cell_order], "manhattan", "single")
+
+  ComplexHeatmap::Heatmap(t(as.matrix(single_cn_estimates[new_feature_names,][,new_cell_order])), row_split = length(levels(clusters)), cluster_columns = F, column_split = feature_factor, row_labels = rep('', ncol(single_cn_estimates)), column_labels = rep('', nrow(joint_cn_estimates)), border = T, col = color_fun, top_annotation = chr_arm, heatmap_legend_param = list(title = "copy_number"), cluster_rows = dend)
 }
 
 #' @export
 get_absolute_copy_number <- function(x, clusters, ref_cluster, scale_factors, is_excluded, is_ref_female){
   new_feature_names <- get_new_feature_names(rownames(x))
   x <- x[,!is_excluded]
+  #hacky way to add support for multiple reference clusters
+  if (length(ref_cluster) > 1){
+    clusters[clusters %in% ref_cluster & !(clusters == ref_cluster[1])] <- ref_cluster[1]
+    ref_cluster <- ref_cluster[1]
+  }
   clusters <- factor(clusters[!is_excluded])
   cn.list <- list()
   for (i in levels(clusters)[levels(clusters) != ref_cluster]){
@@ -393,6 +430,11 @@ get_mse_x_ref <- function(x, clusters, bootstrap_mean_list, x_idx, ref_cluster, 
 #' @export
 fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded, n_bootstrap, sf_start, sf_end, sf_step, weight_by_precision, weight_by_cluster, fit_clusters_pairwise = T, weighting_strategy = "min_size"){
   x <- x[, !is_excluded]
+  #hacky way to add support for multiple reference clusters
+  if (length(ref_cluster) > 1){
+    clusters[clusters %in% ref_cluster & !(clusters == ref_cluster[1])] <- ref_cluster[1]
+    ref_cluster <- ref_cluster[1]
+  }
   clusters <- factor(clusters[!is_excluded])
   bootstrap_mean_list <- list()
   for (i in seq_along(levels(clusters))){
@@ -546,7 +588,7 @@ scDblFinder_custom_function <- function(e, dims){
   e_norm <- normalise_counts(e, nb_overdispersion, pseudo_count, lambda)
   e_norm_pca <- get_pca(e_norm, dims)
   #need to use discard_pcs from global environment - scDblFinder can't pass to the custom function and its includePCs argument does not work properly
-  e_norm_pca$x[,(1:dims)[!((1:dims) %in% discard_pcs)]]
+  e_norm_pca$x[,(1:dims)[!((1:dims) %in% discard_pcs[discard_pcs != 1])]]
 }
 
 #' @export
