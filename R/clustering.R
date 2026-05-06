@@ -296,3 +296,59 @@ get_barcode_probability <- function(barcodes, weights = rep(1, length(barcodes))
   barcode_8_16_probs <- (barcode_8_16_tabs / sum(barcode_8_16_tabs))[barcode_8_16]
   setNames(barcode_1_9_probs * barcode_8_16_probs, barcodes)
 }
+
+#new normalisation function for two-step normalisation - input into PCA on a log-scale, project without PC1, then exponentiate and re-input to PCA to stabilise variance
+#while removing library size effect from both "stable" and highly-variable genes (projecting just variance-stabilised data without PC1 only removes library size from stable features)
+#' @export
+normalise_counts2 <- function(x, overdispersion, pseudo_count, lambda){
+  log((x + pseudo_count) ** lambda)
+}
+
+#simulation-based clustering using the above-described two-step normalisation strategy
+#' @export
+iterative_cluster_sim2 <- function(x, overdispersion, pseudo_count, lambda = NULL, npcs, discard_pcs, k, start = 0, stop = 2 * k, step = 1, seed = 100, iter.limit = 2, rename.clusters = T, tolerance = 0.01){
+  set.seed(seed)
+  use_pcs <- 1:npcs
+  #use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
+  use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
+  use_pcs_sim <- 1:npcs
+  #discard_pcs_sim <- ifelse(1 %in% discard_pcs, 1, NULL)
+  discard_pcs_sim <- 1
+  use_pcs_sim <- use_pcs_sim[!use_pcs_sim %in% discard_pcs_sim][1:length(use_pcs)]
+  #x.norm.pca <- get_pca(exp(correct_normalised_counts(normalise_counts2(x, overdispersion, pseudo_count, lambda), discard_pcs)), npcs)
+  x.norm.pca <- get_pca(exp(correct_normalised_counts(normalise_counts2(x, overdispersion, pseudo_count, lambda), 1)), npcs)
+  x.sim.norm.pca <- get_pca(exp(correct_normalised_counts(normalise_counts2(simulate_counts(x, overdispersion), overdispersion, pseudo_count, lambda), discard_pcs_sim)), npcs)
+  leiden.clusters <- rep("start", ncol(x))
+  for (i in 1:iter.limit){
+    print(paste0("Beginning clustering iteration ", i))
+    leiden.clusters2 <- leiden.clusters
+    for (j in unique(leiden.clusters)){
+      print(paste0("Finding resolution for simulated cluster ", j))
+      #knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j,]), k = k, directed = F, d = NA)
+      knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j,use_pcs]), k = k, directed = F, d = NA)
+      #knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,]), k = k, directed = F, d = NA)
+      knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,use_pcs_sim]), k = k, directed = F, d = NA)
+      leiden.resolution <- ATAClone:::scan_resolution2(knn.graph.sim, start, stop, step, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
+      leiden.clusters2[leiden.clusters == j] <- paste0(leiden.clusters[leiden.clusters == j], "_", ATAClone:::reorder_clusters(igraph::cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership))
+    }
+    leiden.clusters <- leiden.clusters2
+    print(paste0("Found ", length(unique(leiden.clusters)), " clusters"))
+    if (length(unique(leiden.clusters)) > 1 & i != iter.limit){
+      x.list <- list()
+      for (j in unique(leiden.clusters)){
+        x.list[[j]] <- x[,leiden.clusters == j]
+      }
+      x.sim.norm.pca <- get_pca(exp(correct_normalised_counts(normalise_counts2(do.call(cbind, lapply(x.list, simulate_counts, overdispersion))[rownames(x),colnames(x)], overdispersion, pseudo_count, lambda), discard_pcs_sim)), npcs)
+    } else {
+      break
+    }
+  }
+  leiden.clusters <- gsub("start_", "", leiden.clusters)
+  if (rename.clusters){
+    sorted_tabs <- sort(table(leiden.clusters), decreasing = T)
+    new_cluster_ids <- setNames(1:length(sorted_tabs), names(sorted_tabs))
+    leiden.clusters <- factor(unname(new_cluster_ids[as.character(leiden.clusters)]), levels = 1:length(sorted_tabs))
+    names(leiden.clusters) <- colnames(x)
+  }
+  leiden.clusters
+}

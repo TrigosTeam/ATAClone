@@ -627,3 +627,152 @@ get_doublet_thresholds <- function(x, clusters, is_doublet){
   }
   setNames(thresholds, cluster_levels)
 }
+
+#computes differences in log odds-ratios between segments
+get_log_or_dist <- function(x, clusters, test_idx, ref_idx, pseudo_count){
+  #test_idx <- which(clusters %in% test_cluster)
+  #ref_idx <- which(clusters %in% ref_cluster)
+  #as.matrix(dist(log((rowMeans(x[, test_idx] + pseudo_count) / rowMeans(x[, ref_idx] + pseudo_count))), upper = T))
+  #need to add check for is_ref_female
+  sf <- ifelse(grepl("chrX|chrY", rownames(x)), 1, 2)
+  missing_num <- rowSums(x[, test_idx]) == 0
+  missing_denom <- rowSums(x[, ref_idx]) == 0
+  log_or <- log(sf * (rowMeans(x[, test_idx] + pseudo_count) / rowMeans(x[, ref_idx] + sf * pseudo_count)))
+  #seems to give more consistent results if you don't set to NA
+  #log_or[missing_denom | missing_num] <- NA
+  outer(log_or, log_or, "-")
+}
+
+#bootstraps the differences in log odds-ratios between segments - use to estimate variance of log-odds ratio differences
+bootstrap_log_or_dist <- function(x, clusters, test_cluster, ref_cluster, pseudo_count, n_bootstrap = 100){
+  dist_list <- list()
+  test_idx <- which(clusters %in% test_cluster)
+  ref_idx <- which(clusters %in% ref_cluster)
+  for (i in 1:n_bootstrap){
+    test_idx2 <- sample(test_idx, replace = T)
+    ref_idx2 <- sample(ref_idx, replace = T)
+    dist_list[[i]] <- get_log_or_dist(x, clusters, test_idx2, ref_idx2, pseudo_count)
+  }
+  var_list <- list()
+  for (i in 1:ncol(dist_list[[1]])){
+    #print(i)
+    var_list[[i]] <- rowVars(do.call(cbind, lapply(dist_list, function(x, i){x[,i]}, i = i)))
+  }
+  var_mat <- do.call(cbind, var_list)
+}
+
+#smooths copy number estimates by combining information from adjacent bins based both on their distance (in base-pairs) from a bin and the deviation of the log-odds ratio from 1 (normalised by its expected standard deviation)
+get_segmented_cn2 <- function(x, clusters, test_cluster, ref_cluster, is_excluded, pseudo_count, n_bootstrap, z_threshold, min_dist_weight = 0, sample_id = NULL){
+  x <- x[,!is_excluded]
+  clusters <- clusters[!is_excluded]
+  sample_id <- sample_id[!is_excluded]
+  if (!is.null(sample_id)){
+    sample_sfs <- mean(colSums(x[,clusters %in% ref_cluster])) / sapply(split(colSums(x[,clusters %in% ref_cluster]), sample_id[clusters %in% ref_cluster]), mean)[sample_id]
+    x <- t(t(x) * sample_sfs)
+  }
+  x <- x[,]
+  chr_names <- sapply(strsplit(rownames(x), "\\."), `[`, 1)
+  unique_chr <- sort(unique(chr_names))
+  #x_list <- list()
+  #for (i in unique_chr){
+  #  x_list[[i]] <- x[chr_names == i,]
+  #}
+  #create full distance matrix and full bootstrapped values - find neigbours later
+  log_or_dist <- get_log_or_dist(x, clusters, clusters %in% test_cluster, clusters %in% ref_cluster, pseudo_count)
+  log_or_dist_bootstrap_vars <- bootstrap_log_or_dist(x, clusters, test_cluster, ref_cluster, pseudo_count, n_bootstrap = 100)
+  log_or_z_initial <- log_or_dist / sqrt(log_or_dist_bootstrap_vars)
+
+  #find neighbours
+  is_same_chr <- chr_names[2:length(chr_names)] == chr_names[1:(length(chr_names) - 1)]
+  neighbour_idx <- ncol(log_or_z_initial) * (1:ncol(log_or_z_initial) - 1) + 1:ncol(log_or_z_initial) + 1
+  neighbour_zs <- log_or_z_initial[neighbour_idx][is_same_chr]
+
+  #estimate standard deviation from neighbours
+  #we don't bother centring - we assume each bin is an unbiased estimate of its neigbour on average
+  robust_sigma <- 1.4826 * median(abs(neighbour_zs), na.rm = T)
+
+  #re-estimate z
+  log_or_z_final <- log_or_z_initial / robust_sigma
+
+  get_log_or_weights <- function(x, threshold = 1){
+    x[is.na(x)] <- 0
+    x[is.infinite(x)] <- 0
+    x[abs(x) <= threshold] <- 1
+    x[abs(x) > threshold] <- (threshold / abs(x[abs(x) > threshold])) ** 2
+    x
+  }
+  log_or_weights <- get_log_or_weights(log_or_z_final, threshold = z_threshold)
+
+  get_distance_weights <- function(chr_names, min_weight = 1 / length(chr_names)){
+    distance_weights <- outer(chr_names, chr_names, "==")
+    distance_weights[!distance_weights] <- 0
+    distance_weights[distance_weights] <- 1
+    for (i in 1:ncol(distance_weights)){
+      #linearly decreasing denominator
+      #distance_weights[,i] <- distance_weights[,i] / (1 + abs(i - 1:nrow(distance_weights)))
+      #exponentially decreasing denominator
+      distance_weights[,i] <- distance_weights[,i] / 2 ** (abs(i - 1:nrow(distance_weights)))
+      #0 if not i
+      #distance_weights[,i] <- ifelse(1:nrow(distance_weights) == i, 1, 0)
+    }
+    distance_weights[distance_weights < min_weight] <- min_weight
+    distance_weights
+  }
+  distance_weights <- get_distance_weights(chr_names, min_weight = min_dist_weight)
+
+  smoothed_estimates <- numeric(nrow(x))
+  raw_estimates <- rowMeans(x[,clusters == test_cluster]) / rowMeans(x[,clusters %in% ref_cluster])
+  for (i in seq_along(smoothed_estimates)){
+    combined_weights <- distance_weights[,i] * log_or_weights[,i]
+    sf <- ifelse(grepl("chrX|chrY", rownames(x)), 1, 2)
+    smoothed_estimates[i] <- mean(sf * x[,clusters == test_cluster] * combined_weights)  / mean(combined_weights * x[,clusters %in% ref_cluster])
+  }
+  names(smoothed_estimates) <- rownames(x)
+  new_feature_names <- get_new_feature_names(rownames(x))
+  smoothed_estimates[new_feature_names]
+}
+
+#computes absolute copy number estimates after computing scale factors - allows smoothing
+#' @export
+get_absolute_copy_number2 <- function(x, clusters, ref_cluster, scale_factors, is_excluded, is_ref_female, sample_id = NULL, do_smooth = T, pseudo_count = 1, n_bootstrap = 1000, z_threshold = 1, min_dist_weight = 0){
+  new_feature_names <- get_new_feature_names(rownames(x))
+  x <- x[,!is_excluded]
+  #hacky way to add support for multiple reference clusters
+  if (length(ref_cluster) > 1){
+    clusters[clusters %in% ref_cluster & !(clusters == ref_cluster[1])] <- ref_cluster[1]
+    ref_cluster <- ref_cluster[1]
+  }
+  clusters <- factor(clusters[!is_excluded])
+  sample_id <- sample_id[!is_excluded]
+  if (!is.null(sample_id)){
+    sample_sfs <- mean(colSums(x[,clusters %in% ref_cluster])) / sapply(split(colSums(x[,clusters %in% ref_cluster]), sample_id[clusters %in% ref_cluster]), mean)[sample_id]
+    x <- t(t(x) * sample_sfs)
+  }
+  cn.list <- list()
+  for (i in levels(clusters)[levels(clusters) != ref_cluster]){
+    print(paste0("Computing cluster ", i, " copy number"))
+    sf <- scale_factors[paste0("cluster_", i)]
+    if (!do_smooth){
+      cn <- sf * rowMeans(x[new_feature_names, clusters == i]) /
+        rowMeans(x[new_feature_names, clusters == ref_cluster])
+      chr <- gsub("chr", "", sapply(strsplit(new_feature_names, "\\."), `[`, 1))
+      chr <- factor(chr, unique(chr))
+      cn <- ifelse(grepl("X|Y", chr) & !is_ref_female, 1, 2) * cn
+    } else {
+      cn <- scale_factors[paste0("cluster_", i)] * get_segmented_cn2(x, clusters, i, ref_cluster, rep(F, length(clusters)), pseudo_count, n_bootstrap, z_threshold, min_dist_weight, sample_id)
+    }
+    cn.list[[i]] <- cn
+  }
+  if (!do_smooth){
+    cn <- colMeans(scale_factors[paste0("cluster_", clusters[clusters != ref_cluster])] * t(x[new_feature_names, clusters != ref_cluster])) /
+      rowMeans(x[new_feature_names, clusters == ref_cluster])
+    chr <- gsub("chr", "", sapply(strsplit(new_feature_names, "\\."), `[`, 1))
+    chr <- factor(chr, unique(chr))
+    cn <- ifelse(grepl("X|Y", chr) & !is_ref_female, 1, 2) * cn
+    cn.list[["all"]] <- cn
+  } else {
+    clusters <- factor(clusters[!(clusters %in% ref_cluster)])
+    cn.list[["all"]] <- sapply(data.table::transpose(cn.list), weighted.mean, as.integer(table(clusters)))
+  }
+  cn.list
+}
