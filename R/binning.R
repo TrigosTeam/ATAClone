@@ -130,10 +130,28 @@ get_atac_barcode_stats <- function(cr_arc_barcode_stats_path, cr_atac_barcode_st
   atac.barcode.info
 }
 
+#read a 10X-style names file (barcodes.tsv.gz / features.tsv.gz). Tolerates
+#a legacy sentinel header line ("colnames.x." / "rownames.x.") used by some
+#in-package fixtures, but treats real data as the default.
+.read_mtx_names <- function(path, expected_n) {
+  vals <- read.delim(path, sep = "\t", header = FALSE, stringsAsFactors = FALSE)[, 1]
+  if (length(vals) == expected_n + 1L &&
+      grepl("^(colnames|rownames)\\.x\\.$", vals[1])) {
+    vals <- vals[-1]
+  }
+  if (length(vals) != expected_n) {
+    stop(sprintf(
+      "Number of names in %s (%d) does not match matrix dimension (%d)",
+      path, length(vals), expected_n
+    ))
+  }
+  vals
+}
+
 #' @export
 read_matrix <- function(path){
   x <- Matrix::readMM(paste0(path, "/matrix.mtx.gz"))
-  colnames(x) <- read.delim(paste0(path, "/barcodes.tsv.gz"), sep = "\t")[,1]
-  rownames(x) <- read.delim(paste0(path, "/features.tsv.gz"), sep = "\t")[,1]
+  colnames(x) <- .read_mtx_names(paste0(path, "/barcodes.tsv.gz"), ncol(x))
+  rownames(x) <- .read_mtx_names(paste0(path, "/features.tsv.gz"), nrow(x))
   as(x, "dgCMatrix")
 }
