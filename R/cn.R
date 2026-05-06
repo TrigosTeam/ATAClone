@@ -284,9 +284,40 @@ plot_copy_number <- function(x, external_ref, clusters, pca_obj, discard_pcs, is
   ComplexHeatmap::Heatmap(t(as.matrix(single_cn_estimates[new_feature_names,][,new_cell_order])), row_split = length(levels(clusters)), cluster_columns = F, column_split = feature_factor, row_labels = rep('', ncol(single_cn_estimates)), column_labels = rep('', nrow(joint_cn_estimates)), border = T, col = color_fun, top_annotation = chr_arm, heatmap_legend_param = list(title = "copy_number"), cluster_rows = dend)
 }
 
+#Internal: are scale_factors / absolute_cn_list devoid of finite values?
+#fit_cn_clusters returns named all-NA scale_factors (with a warning) when
+#no cluster pair has finite MSE entries — typical of samples with very
+#small clones. Both get_absolute_copy_number and plot_absolute_cn2 must
+#tolerate that input rather than crashing downstream.
+.is_unfittable_scale_factors <- function(scale_factors){
+  length(scale_factors) == 0 || all(!is.finite(scale_factors))
+}
+
+.is_unfittable_cn_list <- function(absolute_cn_list){
+  if (is.null(absolute_cn_list) || length(absolute_cn_list) == 0) return(TRUE)
+  finite_counts <- vapply(absolute_cn_list,
+                          function(v) sum(is.finite(v)),
+                          integer(1))
+  all(finite_counts == 0)
+}
+
 #' @export
 get_absolute_copy_number <- function(x, clusters, ref_cluster, scale_factors, is_excluded, is_ref_female){
   new_feature_names <- get_new_feature_names(rownames(x))
+  if (.is_unfittable_scale_factors(scale_factors)){
+    warning("get_absolute_copy_number: all scale_factors are NA; ",
+            "returning NA copy-number list. This typically follows ",
+            "fit_cn_clusters returning NA scale_factors for samples with ",
+            "very small clones.")
+    clusters_kept <- factor(clusters[!is_excluded])
+    if (length(ref_cluster) > 1) ref_cluster <- ref_cluster[1]
+    non_ref <- setdiff(levels(clusters_kept), ref_cluster)
+    na_vec <- setNames(rep(NA_real_, length(new_feature_names)),
+                       new_feature_names)
+    cn.list <- setNames(lapply(non_ref, function(.) na_vec), non_ref)
+    cn.list[["all"]] <- na_vec
+    return(cn.list)
+  }
   x <- x[,!is_excluded]
   #hacky way to add support for multiple reference clusters
   if (length(ref_cluster) > 1){
@@ -325,6 +356,18 @@ plot_absolute_cn <- function(x, cluster_name){
 
 #' @export
 plot_absolute_cn2 <- function(absolute_cn_list, max_dif = 1.5, y_lim = c(0,8), exclude_clusters = c("all")){
+  if (.is_unfittable_cn_list(absolute_cn_list)){
+    warning("plot_absolute_cn2: no finite copy-number values; ",
+            "emitting placeholder figure. Common cause: fit_cn_clusters ",
+            "returned NA scale_factors for a sample with very small clones.")
+    placeholder <- ggplot() +
+      annotate("text", x = 0, y = 0,
+               label = "Absolute CN unfittable\nall scale factors NA - see warning from fit_cn_clusters",
+               size = 5, hjust = 0.5, vjust = 0.5) +
+      theme_void()
+    plot(placeholder)
+    return(invisible(placeholder))
+  }
   is.empty <- sapply(lapply(absolute_cn_list, is.na), sum) == lengths(absolute_cn_list)
   absolute_cn_list <- absolute_cn_list[!is.empty]
   cn_mat <- do.call(cbind, absolute_cn_list)
