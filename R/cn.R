@@ -527,6 +527,19 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
       x_y_var <- rowVars(x_y_bootstrap)
       is_excluded_x_y <- x_y_var == 0 | rowSums(is.infinite(x_y_bootstrap) > 0) | y_mean < 2
 
+      #with very small clones, *every* bin can be excluded for a given
+      #cluster pair (zero variance + Inf-propagated bootstrap). Skipping
+      #the pair is correct — it has no information to add — and avoids
+      #propagating NaN into mse_array, which downstream collapses to an
+      #empty `which.min(.)` and a setNames-on-empty-vector failure.
+      if (sum(!is_excluded_x_y) == 0) {
+        warning(sprintf(
+          "Skipping cluster pair (%s, %s): no eligible bins (likely a very small clone).",
+          cluster_pairs[[i]][1], cluster_pairs[[i]][2]
+        ))
+        next
+      }
+
       x_y_precision_weights2 <- 1 / rowVars(log(x_y_bootstrap[!is_excluded_x_y,] + 0.01))
       x_y_precision_weights2 <- length(x_y_precision_weights2) * x_y_precision_weights2 / sum(x_y_precision_weights2)
 
@@ -579,8 +592,26 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
   #colnames(mse_melted) <- c(paste0("cluster_", non_ref_clusters), "mse")
   #mse_melted[which(mse_melted$mse == min(mse_melted$mse, na.rm = T)),]
   #mse_array <- mse_array + Reduce(`+`, array_list)
-  list(scale_factors = setNames(as.numeric(rownames(mse_array))[arrayInd(which.min(mse_array), dim(mse_array))], paste0("cluster_", non_ref_clusters)),
-       mse_array = mse_array)
+  cluster_names <- paste0("cluster_", non_ref_clusters)
+  best_idx <- which.min(mse_array)
+  if (length(best_idx) == 0) {
+    #No finite entries in the array — typically because every cluster pair
+    #had no eligible bins under the variance / library-size filter (very
+    #small clones), or because the per-cluster mse vector itself was NA.
+    #Return NA scale factors to keep the contract that scale_factors has
+    #length(non_ref_clusters) names; downstream code can decide whether
+    #to skip absolute-CN entirely.
+    warning("fit_cn_clusters: no finite MSE entries; returning NA scale_factors. ",
+            "This typically indicates all cluster pairs had zero eligible bins ",
+            "(very small clones).")
+    sf_vec <- setNames(rep(NA_real_, length(cluster_names)), cluster_names)
+  } else {
+    sf_vec <- setNames(
+      as.numeric(rownames(mse_array))[arrayInd(best_idx, dim(mse_array))],
+      cluster_names
+    )
+  }
+  list(scale_factors = sf_vec, mse_array = mse_array)
 }
 
 #' @export
