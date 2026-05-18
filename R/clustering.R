@@ -415,12 +415,14 @@ iterative_cluster_sim3 <- function(x, overdispersion, pseudo_count, lambda = NUL
   leiden.clusters
 }
 
+#' @export
 estimate_lib_size_pca <- function(x){
   x_pca <- prcomp(sqrt(t(x)))
   pc1_est <- t(x_pca$x[,1] %*% t(x_pca$rotation[,1])) + rowMeans(sqrt(x))
   colSums(pc1_est ** 2)
 }
 
+#' @export
 simulate_counts2 <- function(mu.mat, overdispersion){
   mu.list <- as.list(as.data.frame(mu.mat))
   sim.list <- list()
