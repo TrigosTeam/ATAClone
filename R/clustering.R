@@ -352,3 +352,140 @@ iterative_cluster_sim2 <- function(x, overdispersion, pseudo_count, lambda = NUL
   }
   leiden.clusters
 }
+
+#' @export
+regress_bins <- function(x, regress_var){
+  x.t <- t(x)
+  fit.lm <- lm(x.t ~ regress_var)
+  t(x.t - fit.lm$fitted.values) + rowMeans(x)
+}
+
+#testing allowing regression of unwanted factors
+#' @export
+iterative_cluster_sim3 <- function(x, overdispersion, pseudo_count, lambda = NULL, npcs, discard_pcs, k, start = 0, stop = 2 * k, step = 1, seed = 100, iter.limit = 2, rename.clusters = T, tolerance = 0.01, regress.var = NULL){
+  set.seed(seed)
+  use_pcs <- 1:npcs
+  #use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
+  use_pcs <- use_pcs[!use_pcs %in% discard_pcs]
+  #need to use more PCs if you don't discard any from real data - we will always discard PC1 from the simulated data
+  npcs_sim <- npcs + 1 - length(discard_pcs)
+  use_pcs_sim <- 1:npcs_sim
+  #discard_pcs_sim <- ifelse(1 %in% discard_pcs, 1, NULL)
+  discard_pcs_sim <- 1
+  use_pcs_sim <- use_pcs_sim[!use_pcs_sim %in% discard_pcs_sim][1:(length(use_pcs))]
+  #x.norm.pca <- get_pca(exp(correct_normalised_counts(normalise_counts2(x, overdispersion, pseudo_count, lambda), discard_pcs)), npcs)
+  x.cor <- exp(correct_normalised_counts(normalise_counts2(x, overdispersion, pseudo_count, lambda), 1))
+  if (!is.null(regress.var)){
+    x.cor <- regress_bins(x.cor, regress.var)
+  }
+  x.norm.pca <- get_pca(x.cor, npcs)
+  x.sim.norm.pca <- get_pca(exp(correct_normalised_counts(normalise_counts2(simulate_counts(x, overdispersion), overdispersion, pseudo_count, lambda), discard_pcs_sim)), npcs_sim)
+  leiden.clusters <- rep("start", ncol(x))
+  for (i in 1:iter.limit){
+    print(paste0("Beginning clustering iteration ", i))
+    leiden.clusters2 <- leiden.clusters
+    for (j in unique(leiden.clusters)){
+      print(paste0("Finding resolution for simulated cluster ", j))
+      #knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j,]), k = k, directed = F, d = NA)
+      knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j,use_pcs]), k = k, directed = F, d = NA)
+      #knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,]), k = k, directed = F, d = NA)
+      knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,use_pcs_sim]), k = k, directed = F, d = NA)
+      leiden.resolution <- ATAClone:::scan_resolution2(knn.graph.sim, start, stop, step, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
+      leiden.clusters2[leiden.clusters == j] <- paste0(leiden.clusters[leiden.clusters == j], "_", ATAClone:::reorder_clusters(igraph::cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership))
+    }
+    leiden.clusters <- leiden.clusters2
+    print(paste0("Found ", length(unique(leiden.clusters)), " clusters"))
+    if (length(unique(leiden.clusters)) > 1 & i != iter.limit){
+      x.list <- list()
+      for (j in unique(leiden.clusters)){
+        x.list[[j]] <- x[,leiden.clusters == j]
+      }
+      x.sim.norm.pca <- get_pca(exp(correct_normalised_counts(normalise_counts2(do.call(cbind, lapply(x.list, simulate_counts, overdispersion))[rownames(x),colnames(x)], overdispersion, pseudo_count, lambda), discard_pcs_sim)), npcs_sim)
+    } else {
+      break
+    }
+  }
+  leiden.clusters <- gsub("start_", "", leiden.clusters)
+  if (rename.clusters){
+    sorted_tabs <- sort(table(leiden.clusters), decreasing = T)
+    new_cluster_ids <- setNames(1:length(sorted_tabs), names(sorted_tabs))
+    leiden.clusters <- factor(unname(new_cluster_ids[as.character(leiden.clusters)]), levels = 1:length(sorted_tabs))
+    names(leiden.clusters) <- colnames(x)
+  }
+  leiden.clusters
+}
+
+estimate_lib_size_pca <- function(x){
+  x_pca <- prcomp(sqrt(t(x)))
+  pc1_est <- t(x_pca$x[,1] %*% t(x_pca$rotation[,1])) + rowMeans(sqrt(x))
+  colSums(pc1_est ** 2)
+}
+
+simulate_counts2 <- function(mu.mat, overdispersion){
+  mu.list <- as.list(as.data.frame(mu.mat))
+  sim.list <- list()
+  if (overdispersion == 0){
+    for (i in seq_along(mu.list)){
+      sim.list[[i]] <- lapply(mu.list[[i]], rpois, n = 1)
+    }
+  } else {
+    for (i in seq_along(mu.list)){
+      sim.list[[i]] <- lapply((1 / overdispersion) / (mu.list[[i]] + 1 / overdispersion), rnbinom, n = 1, size = 1 / overdispersion)
+    }
+  }
+  sim.mat <- do.call(cbind, lapply(sim.list, as.numeric))
+  rownames(sim.mat) <- rownames(x)
+  colnames(sim.mat) <- colnames(x)
+  sim.mat
+}
+
+#new, simpler glm approach - more robust PCA approaches
+#' @export
+iterative_cluster_sim_glm <- function(x, overdispersion = NULL, regress.var = NULL, pseudo_count = 0.25, lambda = 0.4, npcs, k, start = 0, stop = 2 * k, step = 1, seed = 100, iter.limit = 2, rename.clusters = T, tolerance = 0.01){
+  set.seed(seed)
+  lib_size <- estimate_lib_size_pca(x)
+  nb.glm <- glmGamPoi::glm_gp(data = x, design = ~ log(regress.var), size_factors = lib_size, overdispersion = overdispersion)
+  x.cor <- exp(log((x + pseudo_count) ** lambda) - log((nb.glm$Mu + pseudo_count) ** lambda) + log(rowMeans((x + pseudo_count) ** lambda)))
+  #could simulate directly from mu?
+  x.sim <- simulate_counts2(nb.glm$Mu, overdispersion)
+  x.sim.cor <- exp(log((x.sim + pseudo_count) ** lambda) - log((nb.glm$Mu + pseudo_count) ** lambda) + log(rowMeans((x.sim + pseudo_count) ** lambda)))
+  x.norm.pca <- get_pca(x.cor, npcs)
+  x.sim.norm.pca <- get_pca(x.sim.cor, npcs)
+  leiden.clusters <- rep("start", ncol(x))
+  for (i in 1:iter.limit){
+    print(paste0("Beginning clustering iteration ", i))
+    leiden.clusters2 <- leiden.clusters
+    for (j in unique(leiden.clusters)){
+      print(paste0("Finding resolution for simulated cluster ", j))
+      knn.graph <- scran::buildKNNGraph(t(x.norm.pca$x[leiden.clusters == j,]), k = k, directed = F, d = NA)
+      knn.graph.sim <- scran::buildKNNGraph(t(x.sim.norm.pca$x[leiden.clusters == j,]), k = k, directed = F, d = NA)
+      leiden.resolution <- ATAClone:::scan_resolution2(knn.graph.sim, start, stop, step, seed, tolerance = tolerance) / (igraph::gorder(knn.graph) - 1)
+      leiden.clusters2[leiden.clusters == j] <- paste0(leiden.clusters[leiden.clusters == j], "_", ATAClone:::reorder_clusters(igraph::cluster_leiden(knn.graph, "CPM", resolution = leiden.resolution)$membership))
+    }
+    leiden.clusters <- leiden.clusters2
+    print(paste0("Found ", length(unique(leiden.clusters)), " clusters"))
+    if (length(unique(leiden.clusters)) > 1 & i != iter.limit){
+      #resimulate after re-estimating means
+      #testing allowing interaction (switch * to + to make additive)
+      #col_data <- data.frame(cluster = factor(leiden.clusters), beta = log(regress.var))
+      #design_mat <- model.matrix(~ cluster * beta, data = col_data)
+      col_data <- data.frame(cluster = factor(leiden.clusters))
+      design_mat <- model.matrix(~ cluster, data = col_data)
+      design_mat <- cbind(design_mat, beta = log(regress.var))
+      nb.glm2 <- glmGamPoi::glm_gp(data = x, design = design_mat, size_factors = lib_size, overdispersion = overdispersion)
+      x.sim <- simulate_counts2(nb.glm2$Mu, overdispersion)
+      x.sim.cor <- exp(log((x.sim + pseudo_count) ** lambda) - log((nb.glm$Mu + pseudo_count) ** lambda) + log(rowMeans((x.sim + pseudo_count) ** lambda)))
+      x.sim.norm.pca <- get_pca(x.sim.cor, npcs)
+    } else {
+      break
+    }
+  }
+  leiden.clusters <- gsub("start_", "", leiden.clusters)
+  if (rename.clusters){
+    sorted_tabs <- sort(table(leiden.clusters), decreasing = T)
+    new_cluster_ids <- setNames(1:length(sorted_tabs), names(sorted_tabs))
+    leiden.clusters <- factor(unname(new_cluster_ids[as.character(leiden.clusters)]), levels = 1:length(sorted_tabs))
+    names(leiden.clusters) <- colnames(x)
+  }
+  leiden.clusters
+}
