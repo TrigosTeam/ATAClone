@@ -427,8 +427,21 @@ get_mse_x_ref <- function(x, clusters, bootstrap_mean_list, x_idx, ref_cluster, 
   list(mses = setNames(x_mse, sfs), ratio = x_ref_ratio, bootstrap_mat = x_ref_bootstrap, is_excluded = is_excluded_x, clusters = cn_clusters, cluster_weights = cluster_weights)
 }
 
+#' Joint MSE fit of cluster scaling factors for absolute copy number
+#'
+#' Allocates a `length(sfs) ^ (n_clusters - 1)` MSE array; this scales
+#' geometrically and can trivially exceed available memory. The
+#' `max_array_size` argument (default 1e8 entries, ~0.8 GB at 8 bytes
+#' each) guards the allocation and raises an actionable error before R
+#' attempts an out-of-memory allocation. If you hit the guard, either
+#' coarsen `sf_step` (increase the step → fewer grid points) or
+#' reduce the cluster count fed in.
+#'
+#' @param max_array_size integer; maximum allowed entry count for the
+#'   joint MSE array (`length(sfs) ^ (n_clusters - 1)`). Set to `Inf` to
+#'   disable the guard. Default 1e8.
 #' @export
-fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded, n_bootstrap, sf_start, sf_end, sf_step, weight_by_precision, weight_by_cluster, fit_clusters_pairwise = T, weighting_strategy = "min_size"){
+fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded, n_bootstrap, sf_start, sf_end, sf_step, weight_by_precision, weight_by_cluster, fit_clusters_pairwise = T, weighting_strategy = "min_size", max_array_size = 1e8){
   x <- x[, !is_excluded]
   #hacky way to add support for multiple reference clusters
   if (length(ref_cluster) > 1){
@@ -436,12 +449,29 @@ fit_cn_clusters <- function(x, clusters, ref_cluster, is_ref_female, is_excluded
     ref_cluster <- ref_cluster[1]
   }
   clusters <- factor(clusters[!is_excluded])
+  sfs <- seq(sf_start, sf_end, sf_step)
+  n_levels <- length(levels(clusters))
+  if (n_levels < 2) {
+    stop("fit_cn_clusters needs at least 2 cluster levels (a reference + ",
+         ">=1 non-reference); got ", n_levels, ".")
+  }
+  array_entries <- length(sfs) ^ (n_levels - 1)
+  if (is.finite(max_array_size) && array_entries > max_array_size) {
+    stop(sprintf(
+      paste0("fit_cn_clusters MSE array would have %g entries (%d sfs ^ ",
+             "(%d clusters - 1)), exceeding max_array_size = %g. ",
+             "Coarsen sf_step (e.g. %.2f -> %.2f), reduce the cluster ",
+             "count, or pass max_array_size = Inf to override."),
+      array_entries, length(sfs), n_levels, max_array_size,
+      sf_step,
+      max(sf_step, (sf_end - sf_start) / (max_array_size ^ (1 / (n_levels - 1)) - 1))
+    ))
+  }
   bootstrap_mean_list <- list()
   for (i in seq_along(levels(clusters))){
     bootstrap_mean_list[[i]] <- bootstrap_cluster_means(x[,clusters == levels(clusters)[i]], n_bootstrap)
   }
   names(bootstrap_mean_list) <- levels(clusters)
-  sfs <- seq(sf_start, sf_end, sf_step)
   mse_array <- array(0,dim = rep(length(sfs), length(levels(clusters)) - 1), dimnames = lapply(1:(length(levels(clusters)) - 1), function(x){sfs}))
   #first, compute mses for each cluster against the reference (distance from rounded values)
   non_ref_clusters <- levels(clusters)[levels(clusters) != ref_cluster]
