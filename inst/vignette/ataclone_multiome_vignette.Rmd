@@ -243,41 +243,19 @@ ggplot(pred_frac_all, aes(x = cell_stable_frac, y = pred_bin_frac, group = bin, 
 ### Normalisation
 ATAClone adopts the position that variance-stabilising transformations have ideal properties for normalisation: by equalising random noise, features are weighted only by their variance *exceeding* random noise when finding a new representation by principal component analysis. These principal components may represent both biological factors of interest and unwanted technical variation. 
 
-To determine whether a transformation is variance-stabilising, we must first assume a mean-variance relationship. Here, we assume the negative binomial mean-variance relationship σ^2=μ^2+αμ^2 where α=0.015, which is stabilised by the acosh transformation (Ahlmann-Eltze and Huber, 2023). We must also identify a set of principal components which represent unwanted technical variation (we will verify this selection in the next section). 
+To determine whether a transformation is variance-stabilising, we must first assume a mean-variance relationship. Here, we assume the negative binomial mean-variance relationship σ^2=μ^2+αμ^2 where α=0.015, which is stabilised by the acosh transformation (Ahlmann-Eltze and Huber, 2023). We must also identify a set of principal components which represent unwanted technical variation (we will verify this selection in the next section). **UPDATE** - ATAClone now uses a GLM to model and remove technical factors instead of PCA.
 
 After applying the variance-stabilising transformation and correcting for these principal components, we can verify whether the normalised data has stable variance based on whether it closely approximates simulated data after normalisation (drawn as the fitted line on the plot below).
 
 #### Parameters
 
 ```{r}
+#we COULD estimate this from the data - but might not be as straight-forward as it appears...
 nb_overdispersion <- 0.01
-#the overdispersion parameter used to estimate lambda for a power function (usually set same as nb_overdispersion)
-#Setting higher results in decreasing mean-variance trend - useful when transposition efficiency bias confounds clone separation
-fit_nb_overdispersion <- 0.01
-pseudo_count <- 0.5
-lambda <- NULL
-discard_pcs <- c(1,3)
-npcs <- 25
+pseudo_count <- 0.25
+lambda <- 0.4
+npcs <- 20
 ```
-
-#### Code
-
-```{r}
-#find lambda to normalise using power transformation instead of vst
-lambda <- find_lambda(stable_counts_filtered, fit_nb_overdispersion, pseudo_count)
-loess_mean_var <- fit_sim_mean_var(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda)
-
-stable_counts_filtered_norm <- normalise_counts(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda)
-stable_counts_filtered_norm_cor <- correct_normalised_counts(stable_counts_filtered_norm, discard_pcs)
-
-norm_df <- data.frame(mean = rowMeans(stable_counts_filtered_norm_cor), var = rowVars(stable_counts_filtered_norm_cor))
-ggplot(norm_df, aes(x = mean, y = var)) + geom_point() + stat_function(fun = function(x){predict(loess_mean_var, x)})
-```
-
-### PCA
-We have already assumed a set of principal components represent unwanted technical variation in the previous section. Here we verify this selection by comparing to known scATAC-seq technical factors. 
-
-Because our normalisation method does not scale out "library size", PC1 invariably corresponds to total DNA and should be discarded. In some cases, using stably-accessible regions is insufficient to remove the effect of transposition efficiency. When this occurs, it will be seen in the leading principal components as a PC correlating to the fraction of reads in stably-accessible regions. If there is no PC with a high correlation (say, > 0.4), then it may not be necessary to discard any PCs.
 
 #### Code
 
@@ -287,27 +265,60 @@ x <- log(rowMeans(stable_counts_ref)[rowMeans(stable_counts_ref) > 0])
 y <- as.list(as.data.frame(as.matrix(stable_counts_filtered)[rowMeans(stable_counts_ref) > 0,]))
 betas <- get_pois_regression_betas(y, x)
 
-stable_counts_filtered_norm_pca <- get_pca(stable_counts_filtered_norm, npcs)
+lib_size <- estimate_lib_size_pca(stable_counts_filtered)
+
+#fit a negative binomial regression to bin counts accounting for technical factors
+nb_glm <- glmGamPoi::glm_gp(data = stable_counts_filtered, design = ~ log(betas), size_factors = lib_size, overdispersion = nb_overdispersion)
+
+#simulate counts based on glm fit - use to check mean-variance relationship
+stable_counts_sim <- simulate_counts2(nb_glm$Mu, nb_overdispersion)
+stable_counts_sim_norm <- exp(log((stable_counts_sim + pseudo_count) ** lambda) - log((nb_glm$Mu + pseudo_count) ** lambda) + log(rowMeans((stable_counts_sim + pseudo_count) ** lambda)))
+loess_df <- data.frame(sim.mean = rowMeans(stable_counts_sim_norm), sim.var = rowVars(stable_counts_sim_norm))
+loess_mean_var <- loess(sim.var ~ sim.mean, loess_df, span = 0.2)
+
+#normalise counts and check against simulated mean-variance relationship
+stable_counts_filtered_norm <- as.matrix(exp(log((stable_counts_filtered + pseudo_count) ** lambda) - log((nb_glm$Mu + pseudo_count) ** lambda) + log(rowMeans((stable_counts_filtered + pseudo_count) ** lambda))))
+
+norm_df <- data.frame(mean = rowMeans(stable_counts_filtered_norm), var = rowVars(stable_counts_filtered_norm))
+ggplot(norm_df, aes(x = mean, y = var)) + geom_point() + stat_function(fun = function(x){predict(loess_mean_var, x)})
+```
+
+### PCA
+We have already assumed a set of principal components represent unwanted technical variation in the previous section. Here we verify this selection by comparing to known scATAC-seq technical factors. **UPDATE** - ATAClone now uses a GLM to model and remove technical factors instead of PCA - but these are still useful visualisations to confirm unwanted factors
+
+Because our normalisation method does not scale out "library size", PC1 invariably corresponds to total DNA and should be discarded. In some cases, using stably-accessible regions is insufficient to remove the effect of transposition efficiency. When this occurs, it will be seen in the leading principal components as a PC correlating to the fraction of reads in stably-accessible regions. If there is no PC with a high correlation (say, > 0.4), then it may not be necessary to discard any PCs.
+
+#### Code
+
+```{r}
+#this is PCA on transformed counts (not the counts corrected after glm fitting) so will still contain unwanted factors
+stable_counts_filtered_norm_pca <- get_pca(normalise_counts(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda), npcs)
 
 stable_total_cor <- cor(stable_counts_filtered_norm_pca$x, sqrt(atac_stable_total_filtered))[,1]
 stable_frac_cor <- cor(stable_counts_filtered_norm_pca$x, betas)[,1]
 
 pca_df <- data.frame(pc = 1:npcs, stable_total_cor, stable_frac_cor)
-pca_df2 <- data.frame(stable_counts_filtered_norm_pca$x, sqrt_stable_total = sqrt(atac_stable_total_filtered), beta = betas)
+pca_df2 <- data.frame(stable_counts_filtered_norm_pca$x, sqrt_stable_total = sqrt(atac_stable_total_filtered))
 
 ggplot(pca_df, aes(x = pc, y = stable_total_cor, fill = abs(stable_total_cor))) + geom_col() + 
   ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
 best_pc <- paste0("PC", order(abs(pca_df$stable_total_cor), decreasing = T)[1])
 ggplot(pca_df2, aes(x = sqrt_stable_total, y = get(best_pc))) + geom_point() + ylab(best_pc)
 
+pca_df2 <- data.frame(stable_counts_filtered_norm_pca$x, beta = betas)
 ggplot(pca_df, aes(x = pc, y = stable_frac_cor, fill = abs(stable_frac_cor))) + geom_col() + 
   ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1))
 best_pc2 <- paste0("PC", order(abs(pca_df$stable_frac_cor), decreasing = T)[1])
 ggplot(pca_df2, aes(x = beta, y = get(best_pc2))) + geom_point() + ylab(best_pc2)
-```
 
+combined_stats <- as.data.frame(rbind(as.matrix(pca_df[,c(1,2)]), as.matrix(pca_df[,c(1,3)])))
+colnames(combined_stats) <- c("PC", "cor")
+combined_stats$unwanted_factor <- rep(c("total_dna", "transposition_efficiency"), each = npcs)
+ggplot(combined_stats, aes(x = PC, fill = abs(cor), y = cor)) + geom_col() + 
+    ylim(c(-1,1)) + scale_x_continuous(breaks = 1:npcs, minor_breaks = NULL) + scale_fill_gradient(low = "blue", high = "yellow", limits = c(0,1)) + facet_wrap(unwanted_factor ~., nrow = 2)
+```
 ### Graph-based clustering
-ATAClone identifies tumour clones based on graph-based clustering. Briefly, we build a KNN-graph based on the PCA embeddings we previously computed (excluding unwanted technical factors). Then, based on the mean-variance relationship we previously assumed, we simulate homogeneous count data, perform normalisation and dimensionality reduction, and build a second "null" KNN-graph. Using this "null" KNN-graph, we iterate over clustering resolution parameters until we find the highest resolution parameter within a user-specified "tolerance" (the proportion of cells not assigned to the largest cluster). We then use this resolution to perform graph-based clustering on the KNN graph of our original data. This procedure is then repeated recursively (by default, just one more time). For a more in-depth exploration of the clustering parameters, refer to the clustering vignette.
+ATAClone identifies tumour clones based on graph-based clustering. Briefly, we build a KNN-graph based on the PCA embeddings we previously computed (excluding unwanted technical factors). Then, based on the mean-variance relationship we previously assumed, we simulate homogeneous count data, perform normalisation and dimensionality reduction, and build a second "null" KNN-graph. Using this "null" KNN-graph, we iterate over clustering resolution parameters until we find the highest resolution parameter within a user-specified "tolerance" (the proportion of cells not assigned to the largest cluster). We then use this resolution to perform graph-based clustering on the KNN graph of our original data. This procedure is then repeated recursively (by default, just one more time). \
 
 After deriving the clones, we verify that they are not explained by unwanted technical variation by visualising known technical factors on the UMAP representation of the data. We will verify that each "clone" is explained by copy number differences in the next section.
 
@@ -315,14 +326,25 @@ After deriving the clones, we verify that they are not explained by unwanted tec
 
 ```{r}
 knn_k <- 20
+use_seed <- 100
 ```
 
 #### Code
 
 ```{r}
-leiden_clusters <- iterative_cluster_sim(stable_counts_filtered, nb_overdispersion, pseudo_count, lambda, npcs, discard_pcs, knn_k, tolerance = 0.05, start = 0)
-umap_embeddings <- get_umap(stable_counts_filtered_norm_pca$x, npcs, discard_pcs)
-cluster_outliers <- get_cluster_outliers(stable_counts_filtered_norm_pca$x, leiden_clusters, npcs, discard_pcs, knn_k, 0.2)
+leiden_clusters <- iterative_cluster_sim_glm(x = stable_counts_filtered, overdispersion = nb_overdispersion, regress.var = betas, pseudo_count = pseudo_count, lambda = lambda, npcs = npcs, k = knn_k, seed = use_seed, iter.limit = 2, tolerance = 0.05)
+#also set seed to keep UMAP constant
+set.seed(use_seed)
+#this is PCA on the counts normalised and corrected after GLM fitting - should be corrected for unwanted factors
+stable_counts_filtered_norm_pca2 <- get_pca(stable_counts_filtered_norm, npcs)
+umap_embeddings <- get_umap(stable_counts_filtered_norm_pca2$x, npcs, c())
+cluster_outliers <- get_cluster_outliers(stable_counts_filtered_norm_pca2$x, leiden_clusters, npcs, c(), knn_k, 0.2)
+
+#also score for cell cycle - mid/late S phase can correspond to its own cluster due to replication timing
+gene.rankings <- AUCell::AUCell_buildRankings(as.matrix(gex_counts_filtered), plotStats = F, verbose = F)
+cycling.score <- AUCell::AUCell_calcAUC(Seurat::cc.genes.updated.2019, gene.rankings)
+s_score <- cycling.score@assays@data$AUC[1,]
+g2m_score <- cycling.score@assays@data$AUC[2,]
 
 cluster_df <- data.frame(umap_embeddings, cluster = leiden_clusters, stable_total = atac_stable_total_filtered, stable_frac = stable_frac_filtered, is_outlier = cluster_outliers, beta = betas)
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = cluster)) + geom_point()
@@ -330,6 +352,9 @@ ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = stable_total)) + geom_poin
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = stable_frac)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow")
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = beta)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow")
 ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = is_outlier)) + geom_point()
+
+ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = s_score)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow")
+ggplot(cluster_df, aes(x = UMAP_1, y= UMAP_2, color = g2m_score)) + geom_point() + scale_color_gradient(low = "blue", high = "yellow")
 ```
 
 ### Copy number visualisation
@@ -339,9 +364,9 @@ Importantly, the copy number estimates visualised here are only "relative" as op
 
 #### Code
 
-```{r}
+```{r, fig.width=10.5,fig.height=7.5}
 stable_counts_ref <- stable_counts_ref[,colSums(stable_counts_ref) > 1000]
-plot_copy_number(stable_counts_filtered, stable_counts_ref, leiden_clusters, stable_counts_filtered_norm_pca, discard_pcs, is_ref_female = T)
+plot_copy_number(stable_counts_filtered, stable_counts_ref, leiden_clusters, stable_counts_filtered_norm_pca2, c(), is_ref_female = F)
 ```
 
 ## Downstream Analysis
@@ -349,22 +374,25 @@ plot_copy_number(stable_counts_filtered, stable_counts_ref, leiden_clusters, sta
 ### Doublet detection
 After accounting for "low probability" barcodes, it is clear that total RNA and total DNA (as measured by ATAC-seq) are positively correlated. One explanation for this is the occurrence of doublets/multiplets in droplet-based single-cell sequencing.
 
-Here, we will use scDblFinder to help find doublets. As we have already performed extensive filtering, scDblFinder's doublet rate estimate is likely to be underestimated, increasing the doublet score threshold required for doublet classification. We will choose our own threshold here as the value which separates barcodes with high intronic RNA counts from barcodes with low intronic RNA counts. As the score is based in part on total ATAC stable counts, this can help reduce overfitting.
+Here, we will use scDblFinder to help find doublets. As we have already performed extensive filtering, scDblFinder's doublet rate estimate may be underestimated, increasing the doublet score threshold required for doublet classification. We will choose our own threshold here as the value which separates barcodes with high intronic RNA counts from barcodes with low intronic RNA counts. As the score is based in part on total ATAC stable counts, this can help reduce overfitting.
 
 #### Parameters
 
 ```{r}
-min_scdbl_score <- 0.6
+min_scdbl_score <- 0.45
 #scDblFinder appears to be quite stochastic - set a seed
-use.seed <- 100
+use_seed2 <- 100
 ```
 
 #### Code
 
 ```{r}
-set.seed(use.seed)
-scdbl_out <- scDblFinder::scDblFinder(stable_counts_filtered, clusters = leiden_clusters, dims = npcs,
-                                     processing = scDblFinder_custom_function, dbr = 0.025 * ncol(stable_counts_filtered) / 1000, nrounds = 1)
+set.seed(use_seed2)
+#settings per section 1.5.5 here: https://www.bioconductor.org/packages//release/bioc/vignettes/scDblFinder/inst/doc/scDblFinder.html
+discard_pcs <- 1
+scdbl_out <- scDblFinder::scDblFinder(stable_counts_filtered, dims = npcs,
+                                      processing = scDblFinder_custom_function, dbr = 0.03 * ncol(stable_counts_filtered) / 1000, nrounds = 2, removeUnidentifiable = F)
+
 scdbl_df <- data.frame(atac.stable.count = colSums(stable_counts_filtered), 
                        rna.intron.count = colSums(intron_counts_filtered),
                        scdbl_score = scdbl_out$scDblFinder.score)
@@ -378,10 +406,19 @@ ggplot(scdbl_df, aes(x = scdbl_score, y = atac.stable.count, color = rna.intron.
 ### Removing doublets
 Rather than use our thresholded calls directly, we will use them to find a second threshold on the total stable counts per barcode. This is done by considering the thresholded calls to be the ground truth, then finding a total stable counts threshold which maximises the F1 score. The advantage of this approach is that it allows identification of "homotypic" doublets consisting of two cells of the same type, and also reduces the influence of any undetected doublets on copy number/ploidy calls. However, if an experiment contains genuine mixtures of cells of different ploidies, then these high-ploidy cells would also be removed.
 
+#### Parameters
+
+```{r}
+#override automatic threshold if you wish
+override_idx <- c()
+override_val <- c()
+```
+
 #### Code
 
 ```{r}
 doublet_thresholds <- get_doublet_thresholds(stable_counts_filtered, leiden_clusters, scdbl_out$scDblFinder.score > min_scdbl_score)
+doublet_thresholds[override_idx] <- override_val
 scdblFinder_class <- scdbl_out$scDblFinder.score > min_scdbl_score
 is_doublet <- logical(length(leiden_clusters))
 for (i in levels(leiden_clusters)){
@@ -391,7 +428,7 @@ for (i in levels(leiden_clusters)){
                            is.doublet = is_doublet[leiden_clusters == i & !cluster_outliers],
                            is.dbl = scdblFinder_class[leiden_clusters == i & !cluster_outliers]
   )
-  plot(ggplot(doublet_df, aes(x = atac.peak.count, y = rna.intron.count, color = is.dbl)) + geom_point() + scale_x_log10() + scale_y_log10() + geom_vline(xintercept = doublet_thresholds[as.integer(i)]))
+  plot(ggplot(doublet_df, aes(x = atac.peak.count, y = rna.intron.count, color = is.dbl)) + geom_point() + scale_x_log10() + scale_y_log10() + geom_vline(xintercept = doublet_thresholds[as.integer(i)]) + ggtitle(paste0("Cluster ", i)))
 }
 ```
 
@@ -401,11 +438,11 @@ Given the correlation between total RNA and total DNA (as measured by ATAC-seq),
 #### Parameters
 
 ```{r}
-ref_cluster <- 5
-exclude_clusters <- c(7)
+ref_cluster <- c(4)
+exclude_clusters <- c(5)
 y_lim <- c(0,6)
 sf_start <- 0.7
-sf_stop <- 2.4
+sf_stop <- 1.4
 sf_step <- 0.05
 ```
 
@@ -413,12 +450,14 @@ sf_step <- 0.05
 #### Code
 ```{r}
 is_excluded <- cluster_outliers | is_doublet | leiden_clusters %in% exclude_clusters
-cn_fit_out <- ATAClone:::fit_cn_clusters(stable_counts_filtered, leiden_clusters, 5, F, is_excluded, 1000, sf_start, sf_stop, sf_step, T, T)
-absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, 5, cn_fit_out$scale_factors, is_excluded, F)
+cn_fit_out <- fit_cn_clusters(stable_counts_filtered, leiden_clusters, ref_cluster, F, is_excluded, 1000, sf_start, sf_stop, sf_step, F, T)
+absolute_cn_list <- get_absolute_copy_number(stable_counts_filtered, leiden_clusters, ref_cluster, cn_fit_out$scale_factors, is_excluded, F)
+absolute_cn_list_smoothed <- get_absolute_copy_number2(stable_counts_filtered, leiden_clusters, ref_cluster, cn_fit_out$scale_factors, is_excluded, F)
 #for (i in seq_along(absolute_cn_list)){
 #  plot_absolute_cn(absolute_cn_list[[i]], names(absolute_cn_list)[i])
 #}
 plot_absolute_cn2(absolute_cn_list, y_lim = y_lim, exclude_clusters = c("all",exclude_clusters))
+plot_absolute_cn2(absolute_cn_list_smoothed, y_lim = y_lim, exclude_clusters = c("all",exclude_clusters))
 ```
 
 ## Session Information
